@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 
