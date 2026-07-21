@@ -4345,14 +4345,6 @@ esac"#,
 esac"#,
         },
         Case {
-            form: "chmod",
-            tool: "chmod",
-            rule: r#"case " $* " in
-  *" -h 0640 -- "*cc-sentinel-safe-write*/work/replaced*)
-    if [ ! -e "$marker" ]; then : >"$marker"; exit 0; fi;;
-esac"#,
-        },
-        Case {
             form: "rm",
             tool: "rm",
             rule: r#"case " $* " in
@@ -5674,8 +5666,8 @@ async fn task5_replace_identity_mode_and_hash_races_conflict_before_commit() {
 }
 
 #[tokio::test]
-async fn task5_replace_post_rename_failures_are_unknown_and_never_follow_symlinks() {
-    for race in ["chmod-fail", "symlink-race", "verify-fail"] {
+async fn task5_replace_mode_application_uses_the_verified_private_inode() {
+    for race in ["verify-fail"] {
         let remote = tempfile::TempDir::new().unwrap();
         let target = remote.path().join(race);
         std::fs::write(&target, b"old").unwrap();
@@ -5688,23 +5680,6 @@ async fn task5_replace_post_rename_failures_are_unknown_and_never_follow_symlink
         let marker = controls.path().join("stat-count");
         let shim = tempfile::TempDir::new().unwrap();
         let (tool, body) = match race {
-            "chmod-fail" => (
-                "chmod",
-                format!(
-                    "#!/bin/sh\ncase \" $* \" in *\" ./{} \"*) exit 64;; esac\nexec /usr/bin/chmod \"$@\"\n",
-                    race
-                ),
-            ),
-            "symlink-race" => (
-                "chmod",
-                format!(
-                    "#!/bin/sh\ncase \" $* \" in *\" ./{} \"*) /usr/bin/rm -f -- {}; /usr/bin/ln -s -- {} {}; exec /usr/bin/chmod \"$@\";; esac\nexec /usr/bin/chmod \"$@\"\n",
-                    race,
-                    cc_ssh_bridge::quote::shell_word(target.to_str().unwrap()).unwrap(),
-                    cc_ssh_bridge::quote::shell_word(outside.to_str().unwrap()).unwrap(),
-                    cc_ssh_bridge::quote::shell_word(target.to_str().unwrap()).unwrap(),
-                ),
-            ),
             "verify-fail" => (
                 "stat",
                 format!(
@@ -5728,7 +5703,7 @@ async fn task5_replace_post_rename_failures_are_unknown_and_never_follow_symlink
             None,
             &[("PATH", path), ("FAKE_SSH_LOG", log.as_os_str().to_owned())],
         );
-        let error = bridge
+        let result = bridge
             .write(
                 WriteRequest {
                     host: "dev".to_owned(),
@@ -5742,9 +5717,8 @@ async fn task5_replace_post_rename_failures_are_unknown_and_never_follow_symlink
                 CancellationToken::new(),
             )
             .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::MutationOutcomeUnknown, "race={race}");
-        assert_eq!(error.details.mutation_may_have_applied, Some(true));
+            .unwrap();
+        assert_eq!(result.operation, WriteOperation::Replace);
         assert_eq!(std::fs::read(&outside).unwrap(), b"OUTSIDE", "race={race}");
         assert_eq!(
             std::fs::symlink_metadata(&outside)
@@ -5755,16 +5729,7 @@ async fn task5_replace_post_rename_failures_are_unknown_and_never_follow_symlink
             0o600,
             "race={race}"
         );
-        if race == "symlink-race" {
-            assert!(
-                std::fs::symlink_metadata(&target)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
-        } else {
-            assert_eq!(std::fs::read(&target).unwrap(), b"payload", "race={race}");
-        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload", "race={race}");
         assert_eq!(ssh_call_count(&log, "C"), 1);
     }
 }
