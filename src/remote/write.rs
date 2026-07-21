@@ -67,7 +67,30 @@ cc_mutation_replace() {
 }
 
 cc_mutation_mode() {
-    chmod "$1" -- "$2"
+    cc_mode=$1
+    cc_mode_path=$2
+    cc_mutation_stat_valid "$cc_mode_path" || return 1
+    case "$CC_STAT_TYPE" in 8???) ;; *) return 1 ;; esac
+    cc_mode_device=$CC_STAT_DEVICE
+    cc_mode_inode=$CC_STAT_INODE
+    exec 9<>"$cc_mode_path" || return 1
+    cc_mutation_parent_stat_follow_valid /proc/self/fd/9 || {
+        exec 9>&-
+        return 1
+    }
+    case "$CC_STAT_TYPE" in 8???) ;; *)
+        exec 9>&-
+        return 1
+        ;;
+    esac
+    if [ "$CC_STAT_DEVICE:$CC_STAT_INODE" != "$cc_mode_device:$cc_mode_inode" ]; then
+        exec 9>&-
+        return 1
+    fi
+    chmod "$cc_mode" -- /proc/self/fd/9
+    cc_mode_status=$?
+    exec 9>&-
+    return "$cc_mode_status"
 }
 
 cc_mutation_remove() {
