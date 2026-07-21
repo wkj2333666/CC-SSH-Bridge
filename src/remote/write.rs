@@ -67,7 +67,7 @@ cc_mutation_replace() {
 }
 
 cc_mutation_mode() {
-    chmod -h "$1" -- "$2"
+    chmod "$1" -- "$2"
 }
 
 cc_mutation_remove() {
