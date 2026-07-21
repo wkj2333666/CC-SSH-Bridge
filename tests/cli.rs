@@ -759,7 +759,7 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     let plugin_manifest = bundle.join(".claude-plugin/plugin.json");
     let mcp_manifest = bundle.join(".mcp.json");
     let skill_source = bundle.join("skills/remote-ssh-ops");
-    let skill_target = private.path().join("user/.agents/skills/remote-ssh-ops");
+    let skill_target = private.path().join("user/.claude/skills/remote-ssh-ops");
     let identity_file = private.path().join("user/state/cc-ssh-bridge/install.toml");
     let claude = private.path().join("bin/claude");
     let cc_state = private.path().join("cc-state.json");
@@ -779,7 +779,7 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(
         &plugin_manifest,
-        br#"{"name":"cc-ssh-bridge","skills":"./skills/","mcpServers":"./.mcp.json"}"#,
+        br#"{"name":"cc-ssh-bridge","version":"0.1.0"}"#,
     )
     .unwrap();
     fs::write(
@@ -790,11 +790,6 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     fs::write(
         skill_source.join("SKILL.md"),
         b"---\nname: remote-ssh-ops\ndescription: safe remote operations\n---\n\n# Remote SSH Ops\n",
-    )
-    .unwrap();
-    fs::write(
-        skill_source.join("agents/openai.yaml"),
-        b"interface: {}\ndependencies:\n  tools:\n    - type: \"mcp\"\n      value: \"ssh-bridge\"\n      transport: \"stdio\"\n",
     )
     .unwrap();
     fs::write(
@@ -827,21 +822,21 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
                 cc_ssh_bridge::quote::shell_word(message).unwrap()
             ),
             None => {
-                let warning = if options.known_warning_before_missing {
-                    "printf '%s\\n' \"WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)\" >&2;"
-                } else {
-                    ""
-                };
+                let state_quote = quote(&cc_state);
+                let binary_quote = quote(&binary);
+                let drift_path = private.path().join("mcp-drifted");
+                let drift_quote = quote(&drift_path);
                 format!(
-                    "if [ -f {state} ]; then cat {state}; else {warning} printf '%s\\n' \"Error: No MCP server named 'ssh-bridge' found.\" >&2; exit 1; fi",
-                    state = quote(&cc_state)
+                    "if [ -f {state} ]; then if [ -f {drift} ]; then printf 'ssh-bridge:\\n  Command: /bin/false\\n'; else printf 'ssh-bridge:\\n  Command: {binary}\\n'; fi; else printf '%s\\n' 'No MCP server named \"ssh-bridge\"' >&2; exit 1; fi",
+                    state = state_quote,
+                    drift = drift_quote,
+                    binary = binary_quote
                 )
             }
         }
     };
     let mut add_actions = vec![format!(
-        "cp {source} {state}",
-        source = quote(&mcp_value),
+        "touch {state}",
         state = quote(&cc_state)
     )];
     if options.add_skill_conflict {
@@ -853,8 +848,8 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     }
     if options.drift_mcp_after_add {
         add_actions.push(format!(
-            "printf '%s' '{{\"transport\":{{\"type\":\"stdio\",\"command\":\"/bin/false\",\"args\":[\"mcp\"]}}}}' >{state}",
-            state = quote(&cc_state)
+            "touch {drift}",
+            drift = quote(&private.path().join("mcp-drifted"))
         ));
     }
     if options.fail_after_add {
