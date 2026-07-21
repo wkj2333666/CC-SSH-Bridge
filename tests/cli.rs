@@ -835,10 +835,7 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
             }
         }
     };
-    let mut add_actions = vec![format!(
-        "touch {state}",
-        state = quote(&cc_state)
-    )];
+    let mut add_actions = vec![format!("touch {state}", state = quote(&cc_state))];
     if options.add_skill_conflict {
         add_actions.push(format!(
             "mkdir -p {parent}; printf conflict >{target}",
