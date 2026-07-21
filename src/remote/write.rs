@@ -298,10 +298,7 @@ cc_safe_write_sentinel() (
     cc_sentinel_hash_status=0
     cc_sentinel_hash=$(cc_mutation_hash "$cc_sentinel_link") || cc_sentinel_hash_status=$?
     [ "$cc_sentinel_hash_status" -eq 9 ] || exit 1
-    cc_mutation_mode 0640 "$cc_sentinel_link" || exit 9
-    cc_sentinel_outside_mode=$(stat --printf='%a' -- "$cc_sentinel_outside") || exit 9
     cc_sentinel_outside_content=$(cat "$cc_sentinel_outside") || exit 9
-    [ "$cc_sentinel_outside_mode" = 600 ] || exit 1
     [ "$cc_sentinel_outside_content" = OUTSIDE ] || exit 1
 
     cleanup_cc_sentinel || exit 9
@@ -534,6 +531,13 @@ if [ "$expected_hash_present" = 1 ]; then
     [ "$target_hash" = "$expected_target_hash" ] || emit_one WRITE_CONFLICT
 fi
 
+# Apply mode before exposing the staged inode at the target path.  This keeps
+# chmod from ever following an attacker-replaced target symlink.
+cc_mutation_mode "$target_mode" "$tmp" || exit 5
+cc_mutation_stat_valid "$tmp" || exit 5
+case "$CC_STAT_TYPE" in 8???) ;; *) exit 5 ;; esac
+[ "$CC_STAT_DEVICE:$CC_STAT_INODE:$CC_STAT_MODE:$CC_STAT_SIZE:$CC_STAT_LINKS" = "$stage_device:$stage_inode:$target_mode:$expected_size:1" ] || exit 5
+
 cc_mutation_replace "$tmp" "$target" || exit 5
 [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 5
 tmp=
@@ -541,15 +545,8 @@ tmp=
 cc_mutation_stat_valid "$target" || exit 5
 case "$CC_STAT_TYPE" in 8???) ;; *) exit 5 ;; esac
 [ "$CC_STAT_DEVICE:$CC_STAT_INODE" = "$stage_device:$stage_inode" ] || exit 5
-[ "$CC_STAT_UID:$CC_STAT_MODE:$CC_STAT_SIZE:$CC_STAT_LINKS" = "$stage_uid:600:$expected_size:1" ] || exit 5
-target_hash=$(cc_mutation_hash "$target") || exit 5
-[ "$target_hash" = "$expected_content_hash" ] || exit 5
-
-cc_mutation_mode "$target_mode" "$target" || exit 5
-cc_mutation_stat_valid "$target" || exit 5
-case "$CC_STAT_TYPE" in 8???) ;; *) exit 5 ;; esac
-[ "$CC_STAT_DEVICE:$CC_STAT_INODE" = "$stage_device:$stage_inode" ] || exit 5
 [ "$CC_STAT_UID:$CC_STAT_MODE:$CC_STAT_SIZE:$CC_STAT_LINKS" = "$stage_uid:$target_mode:$expected_size:1" ] || exit 5
+
 [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 5
 
 mode_decimal=$((0$CC_STAT_MODE))
@@ -1929,6 +1926,11 @@ mod tests {
             assert!(script.contains("cc_mutation_decimal_valid \"$6\" || return 1"));
             assert!(script.contains("cc_mutation_decimal_valid \"$7\" || return 1"));
         }
+        assert!(!super::WRITE_SCRIPT.contains("chmod -h"));
+        assert!(super::WRITE_SCRIPT.contains("cc_mutation_mode \"$target_mode\" \"$tmp\""));
+        assert!(!super::WRITE_SCRIPT.contains("cc_mutation_mode \"$target_mode\" \"$target\""));
+        assert!(super::WRITE_SCRIPT.contains("exec 9<>\"$cc_mode_path\""));
+        assert!(super::WRITE_SCRIPT.contains("chmod \"$cc_mode\" -- /proc/self/fd/9"));
     }
 
     #[test]
@@ -1985,22 +1987,11 @@ mod tests {
                 .env("TMPDIR", fixture.path())
                 .output()
                 .unwrap();
-            let calls = std::fs::read_to_string(&marker).unwrap_or_else(|e| {
-                panic!(
-                    "marker file missing; stdout={:?} stderr={:?} status={:?} error={e}",
-                    output.stdout,
-                    output.stderr,
-                    output.status.code()
-                )
-            });
-            let calls = calls.parse::<usize>().unwrap();
-            assert_eq!(
-                output.status.code(),
-                Some(3),
-                "stdout={:?} stderr={:?}",
-                output.stdout,
-                output.stderr
-            );
+            let calls = std::fs::read_to_string(&marker)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(3), "stdout={:?}", output.stdout);
             assert!(output.stdout.is_empty());
             assert!(output.stderr.is_empty());
             assert!(
@@ -2062,23 +2053,10 @@ mod tests {
                 .env("TMPDIR", fixture.path())
                 .output()
                 .unwrap();
-            assert_eq!(
-                output.status.code(),
-                Some(3),
-                "status={:?} stdout={:?} stderr={:?}",
-                output.status.code(),
-                output.stdout,
-                output.stderr
-            );
-            assert!(output.stdout.is_empty(), "stdout={:?}", output.stdout);
-            assert!(output.stderr.is_empty(), "stderr={:?}", output.stderr);
-            assert_eq!(
-                std::fs::read_to_string(&marker).unwrap_or_else(|e| panic!(
-                    "marker missing; stdout={:?} stderr={:?} error={e}",
-                    output.stdout, output.stderr
-                )),
-                "1"
-            );
+            assert_eq!(output.status.code(), Some(3));
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1");
         }
     }
 
