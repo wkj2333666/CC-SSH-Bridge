@@ -1,0 +1,6 @@
+.worktrees/
+target/
+.superpowers/
+__pycache__/
+*.pyc
+bin/

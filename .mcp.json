@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ssh-bridge": {
+      "command": "./bin/cc-ssh-bridge",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
