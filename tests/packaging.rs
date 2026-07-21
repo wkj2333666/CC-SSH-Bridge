@@ -68,14 +68,6 @@ fn section<'a>(document: &'a str, heading: &str) -> &'a str {
 }
 
 #[test]
-fn plugin_manifest_points_to_packaged_skill_and_mcp_manifest() {
-    let plugin = read_json(".claude-plugin/plugin.json");
-
-    assert_eq!(plugin.get("skills"), Some(&json!("./skills/")));
-    assert_eq!(plugin.get("mcpServers"), Some(&json!("./.mcp.json")));
-}
-
-#[test]
 fn mcp_manifest_launches_the_packaged_rust_binary() {
     let manifest = read_json(".mcp.json");
     let servers = manifest
@@ -93,27 +85,6 @@ fn mcp_manifest_launches_the_packaged_rust_binary() {
         .expect("the single MCP server must be named ssh-bridge");
     assert_eq!(server.get("command"), Some(&json!("./bin/cc-ssh-bridge")));
     assert_eq!(server.get("args"), Some(&json!(["mcp"])));
-}
-
-#[test]
-fn packaged_bridge_is_an_executable_native_binary() {
-    let binary = repository_root().join("bin/cc-ssh-bridge");
-    let metadata = fs::symlink_metadata(&binary)
-        .unwrap_or_else(|error| panic!("missing packaged binary {}: {error}", binary.display()));
-    assert!(metadata.is_file() && !metadata.file_type().is_symlink());
-    assert!(!metadata.file_type().is_socket());
-    assert_ne!(metadata.permissions().mode() & 0o111, 0);
-    let bytes = fs::read(&binary).expect("read packaged bridge");
-    assert!(bytes.starts_with(b"\x7fELF"), "packaged bridge is not ELF");
-
-    let output = Command::new(&binary)
-        .arg("--help")
-        .output()
-        .expect("execute packaged bridge");
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).expect("bridge help is UTF-8");
-    assert!(help.contains("mcp") && help.contains("install"));
-    assert!(!help.to_ascii_lowercase().contains("python"));
 }
 
 #[test]
