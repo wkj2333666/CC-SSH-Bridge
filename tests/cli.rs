@@ -822,19 +822,18 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
             ),
             None => {
                 let state_quote = quote(&cc_state);
-                let binary_quote = quote(&binary);
-                let drift_path = private.path().join("mcp-drifted");
-                let drift_quote = quote(&drift_path);
                 format!(
-                    "if [ -f {state} ]; then if [ -f {drift} ]; then printf 'ssh-bridge:\\n  Command: /bin/false\\n'; else printf 'ssh-bridge:\\n  Command: {binary}\\n'; fi; else printf '%s\\n' 'No MCP server named \"ssh-bridge\"' >&2; exit 1; fi",
-                    state = state_quote,
-                    drift = drift_quote,
-                    binary = binary_quote
+                    "if [ -f {state} ]; then printf 'ssh-bridge:\\n  Command: %s\\n' \"$(cat {state})\"; else printf '%s\\n' 'No MCP server named \"ssh-bridge\"' >&2; exit 1; fi",
+                    state = state_quote
                 )
             }
         }
     };
-    let mut add_actions = vec![format!("touch {state}", state = quote(&cc_state))];
+    let mut add_actions = vec![format!(
+        "printf '%s' {binary} >{state}",
+        binary = quote(&binary),
+        state = quote(&cc_state)
+    )];
     if options.add_skill_conflict {
         add_actions.push(format!(
             "mkdir -p {parent}; printf conflict >{target}",
@@ -844,8 +843,8 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     }
     if options.drift_mcp_after_add {
         add_actions.push(format!(
-            "touch {drift}",
-            drift = quote(&private.path().join("mcp-drifted"))
+            "printf '%s' /bin/false >{state}",
+            state = quote(&cc_state)
         ));
     }
     if options.fail_after_add {
@@ -919,11 +918,7 @@ async fn task9_installer_is_dry_run_by_default_then_applies_idempotently() {
 #[tokio::test]
 async fn task9_installer_refuses_unrelated_mcp_and_differentiates_get_failure() {
     let fixture = install_fixture(InstallFixtureOptions::default());
-    fs::write(
-        &fixture.cc_state,
-        br#"{"transport":{"type":"stdio","command":"/bin/false","args":["mcp"]}}"#,
-    )
-    .unwrap();
+    fs::write(&fixture.cc_state, "/bin/false").unwrap();
     assert!(install_user(fixture.layout.clone(), true).await.is_err());
     assert!(!fixture.layout.skill_target.exists());
     assert!(!fixture.layout.identity_file.exists());
@@ -965,7 +960,10 @@ async fn task9_installer_accepts_trusted_root_owned_cc_executable() {
     let error = install_user(fixture.layout.clone(), false)
         .await
         .unwrap_err();
-    assert_eq!(error.message, "`claude mcp get` returned invalid JSON");
+    assert_eq!(
+        error.message,
+        "an MCP server named ssh-bridge has a different configuration"
+    );
 }
 
 #[tokio::test]
@@ -1100,9 +1098,8 @@ async fn task9_installer_rollback_never_removes_concurrently_replaced_mcp() {
         ..InstallFixtureOptions::default()
     });
     assert!(install_user(fixture.layout.clone(), true).await.is_err());
-    let state: serde_json::Value =
-        serde_json::from_slice(&fs::read(&fixture.cc_state).unwrap()).unwrap();
-    assert_eq!(state["transport"]["command"], "/bin/false");
+    let state = fs::read_to_string(&fixture.cc_state).unwrap();
+    assert_eq!(state.trim(), "/bin/false");
     assert!(
         !fs::read_to_string(&fixture.log)
             .unwrap()
