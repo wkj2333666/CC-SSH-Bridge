@@ -2678,10 +2678,7 @@ async fn task6_snapshot_capability_mismatch_with_stdout_is_not_retried() {
     assert_eq!(ssh_call_count(&ssh_log, "P"), 1);
     assert_eq!(ssh_call_count(&ssh_log, "C"), 1);
     assert_eq!(phase_log(&phases), ["S"]);
-    assert_eq!(
-        spool_file_count(&runtime.path().join("cc-ssh-bridge")),
-        0
-    );
+    assert_eq!(spool_file_count(&runtime.path().join("cc-ssh-bridge")), 0);
 }
 
 #[tokio::test]
@@ -3004,10 +3001,7 @@ async fn task6_snapshot_accepts_exact_write_limit_rejects_plus_one_and_cleans_sp
         Some("plus-one")
     );
     assert_eq!(phase_log(&phases), ["S", "M", "S"]);
-    assert_eq!(
-        spool_file_count(&runtime.path().join("cc-ssh-bridge")),
-        0
-    );
+    assert_eq!(spool_file_count(&runtime.path().join("cc-ssh-bridge")), 0);
 }
 
 #[tokio::test]
@@ -3058,10 +3052,7 @@ async fn task6_snapshot_success_raw_maximum_plus_one_is_contract_request_too_lar
     assert_eq!(error.details.failed_path.as_deref(), Some("target"));
     assert_eq!(std::fs::read_to_string(&count).unwrap(), "3");
     assert_eq!(phase_log(&phases), ["S"]);
-    assert_eq!(
-        spool_file_count(&runtime.path().join("cc-ssh-bridge")),
-        0
-    );
+    assert_eq!(spool_file_count(&runtime.path().join("cc-ssh-bridge")), 0);
 }
 
 #[tokio::test]
@@ -3356,10 +3347,7 @@ async fn task6_snapshot_raw_read_partial_failure_is_closed_read_conflict() {
     assert_eq!(phase_log(&phases), ["S"]);
     assert_eq!(std::fs::read_to_string(&count).unwrap(), "2");
     assert_eq!(std::fs::read(remote.path().join("race")).unwrap(), b"old\n");
-    assert_eq!(
-        spool_file_count(&runtime.path().join("cc-ssh-bridge")),
-        0
-    );
+    assert_eq!(spool_file_count(&runtime.path().join("cc-ssh-bridge")), 0);
 }
 
 #[tokio::test]
@@ -5151,10 +5139,7 @@ async fn task5_cleanup_signal_removes_remote_stage_and_local_spools() {
     assert_eq!(error.details.mutation_may_have_applied, Some(true));
     assert!(!remote.path().join("cancelled").exists());
     assert_eq!(ssh_call_count(&ssh_log, "C"), 1);
-    assert_eq!(
-        spool_file_count(&runtime.path().join("cc-ssh-bridge")),
-        0
-    );
+    assert_eq!(spool_file_count(&runtime.path().join("cc-ssh-bridge")), 0);
 }
 
 #[tokio::test]

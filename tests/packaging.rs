@@ -91,10 +91,7 @@ fn mcp_manifest_launches_the_packaged_rust_binary() {
     let server = servers
         .get("ssh-bridge")
         .expect("the single MCP server must be named ssh-bridge");
-    assert_eq!(
-        server.get("command"),
-        Some(&json!("./bin/cc-ssh-bridge"))
-    );
+    assert_eq!(server.get("command"), Some(&json!("./bin/cc-ssh-bridge")));
     assert_eq!(server.get("args"), Some(&json!(["mcp"])));
 }
 

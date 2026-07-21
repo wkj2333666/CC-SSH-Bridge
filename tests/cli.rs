@@ -760,9 +760,7 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     let mcp_manifest = bundle.join(".mcp.json");
     let skill_source = bundle.join("skills/remote-ssh-ops");
     let skill_target = private.path().join("user/.agents/skills/remote-ssh-ops");
-    let identity_file = private
-        .path()
-        .join("user/state/cc-ssh-bridge/install.toml");
+    let identity_file = private.path().join("user/state/cc-ssh-bridge/install.toml");
     let claude = private.path().join("bin/claude");
     let cc_state = private.path().join("cc-state.json");
     let mcp_value = private.path().join("matching-mcp.json");
@@ -818,9 +816,8 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
         .unwrap(),
     )
     .unwrap();
-    let quote = |path: &std::path::Path| {
-        cc_ssh_bridge::quote::shell_word(path.to_str().unwrap()).unwrap()
-    };
+    let quote =
+        |path: &std::path::Path| cc_ssh_bridge::quote::shell_word(path.to_str().unwrap()).unwrap();
     let get_body = if options.hang_get {
         "sleep 30".to_owned()
     } else {
@@ -992,10 +989,7 @@ async fn task9_installer_accepts_trusted_root_owned_cc_executable() {
     let error = install_user(fixture.layout.clone(), false)
         .await
         .unwrap_err();
-    assert_eq!(
-        error.message,
-        "`claude mcp get` returned invalid JSON"
-    );
+    assert_eq!(error.message, "`claude mcp get` returned invalid JSON");
 }
 
 #[tokio::test]

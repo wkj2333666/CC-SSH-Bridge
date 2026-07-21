@@ -1756,10 +1756,7 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
             );
         } else {
             let (argv, command) = only_command_record(&log);
-            let shape = (
-                argv,
-                fixed_script_prefix(&command, " cc-ssh-bridge-run "),
-            );
+            let shape = (argv, fixed_script_prefix(&command, " cc-ssh-bridge-run "));
             if let Some(expected) = &run_shape {
                 assert_eq!(&shape, expected, "cwd altered argv/wrapper: {value:?}");
             } else {

@@ -975,10 +975,16 @@ fn mcp_matches(stdout: &[u8], binary: &Path) -> BridgeResult<bool> {
         return Ok(false);
     };
     // Parse "Command: <path>" from claude mcp get output
-    let Some(command_line) = text.lines().find(|line| line.trim_start().starts_with("Command: ")) else {
+    let Some(command_line) = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("Command: "))
+    else {
         return Ok(false);
     };
-    let command = command_line.trim_start().strip_prefix("Command: ").unwrap_or("");
+    let command = command_line
+        .trim_start()
+        .strip_prefix("Command: ")
+        .unwrap_or("");
     let command = command.trim();
     if command.is_empty() {
         return Ok(false);
@@ -1427,15 +1433,18 @@ fn report(applied: bool, resolved: &ResolvedInstall, actions: Vec<String>) -> In
 }
 
 fn find_executable(name: &str) -> BridgeResult<PathBuf> {
-    let path = nonempty_environment("PATH")
-        .ok_or_else(|| BridgeError::invalid_config("PATH is required to locate Claude Code CLI (claude)"))?;
+    let path = nonempty_environment("PATH").ok_or_else(|| {
+        BridgeError::invalid_config("PATH is required to locate Claude Code CLI (claude)")
+    })?;
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(name);
         if let Ok(canonical) = canonical_secure_cc_executable(&candidate) {
             return Ok(canonical);
         }
     }
-    Err(BridgeError::invalid_config("cc (Claude Code CLI) was not found on PATH"))
+    Err(BridgeError::invalid_config(
+        "cc (Claude Code CLI) was not found on PATH",
+    ))
 }
 
 fn nonempty_environment(name: &str) -> Option<OsString> {

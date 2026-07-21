@@ -674,12 +674,8 @@ fn task7_constructor_enforces_exact_frame_and_inflight_bounds() {
         too_small,
         BridgeError::invalid_argument("MCP frame bound is invalid")
     );
-    let too_large = McpServer::new(
-        Arc::clone(&service),
-        cc_ssh_bridge::MAX_FRAME_BYTES + 1,
-        2,
-    )
-    .unwrap_err();
+    let too_large =
+        McpServer::new(Arc::clone(&service), cc_ssh_bridge::MAX_FRAME_BYTES + 1, 2).unwrap_err();
     assert_eq!(
         too_large,
         BridgeError::invalid_argument("MCP frame bound is invalid")
