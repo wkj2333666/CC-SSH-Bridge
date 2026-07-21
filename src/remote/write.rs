@@ -1963,10 +1963,10 @@ mod tests {
                 .output()
                 .unwrap();
             let calls = std::fs::read_to_string(&marker)
-                .unwrap()
-                .parse::<usize>()
+                .unwrap_or_else(|e| panic!("marker file missing; stdout={:?} stderr={:?} status={:?} error={e}", output.stdout, output.stderr, output.status.code()));
+            let calls = calls.parse::<usize>()
                 .unwrap();
-            assert_eq!(output.status.code(), Some(3), "stdout={:?}", output.stdout);
+            assert_eq!(output.status.code(), Some(3), "stdout={:?} stderr={:?}", output.stdout, output.stderr);
             assert!(output.stdout.is_empty());
             assert!(output.stderr.is_empty());
             assert!(
@@ -2028,10 +2028,10 @@ mod tests {
                 .env("TMPDIR", fixture.path())
                 .output()
                 .unwrap();
-            assert_eq!(output.status.code(), Some(3));
-            assert!(output.stdout.is_empty());
-            assert!(output.stderr.is_empty());
-            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1");
+            assert_eq!(output.status.code(), Some(3), "status={:?} stdout={:?} stderr={:?}", output.status.code(), output.stdout, output.stderr);
+            assert!(output.stdout.is_empty(), "stdout={:?}", output.stdout);
+            assert!(output.stderr.is_empty(), "stderr={:?}", output.stderr);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap_or_else(|e| panic!("marker missing; stdout={:?} stderr={:?} error={e}", output.stdout, output.stderr)), "1");
         }
     }
 
