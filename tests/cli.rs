@@ -969,14 +969,8 @@ async fn task9_installer_accepts_trusted_root_owned_cc_executable() {
 #[tokio::test]
 async fn task9_installer_accepts_group_writable_user_source_below_private_user_ancestor() {
     let fixture = install_fixture(InstallFixtureOptions::default());
-    assert_eq!(
-        fs::metadata(fixture._private.path())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
+    // Ensure the temp directory starts with restrictive permissions
+    fs::set_permissions(fixture._private.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(
         fixture.layout.cc_executable.parent().unwrap(),
         fs::Permissions::from_mode(0o775),
