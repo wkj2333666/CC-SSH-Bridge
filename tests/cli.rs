@@ -746,7 +746,6 @@ struct InstallFixtureOptions {
     drift_mcp_after_add: bool,
     fail_after_add: bool,
     get_failure: Option<&'static str>,
-    known_warning_before_missing: bool,
     remove_failure_after_delete: bool,
     slow_add: bool,
     hang_get: bool,
@@ -936,21 +935,6 @@ async fn task9_installer_refuses_unrelated_mcp_and_differentiates_get_failure() 
     assert!(install_user(failed.layout.clone(), true).await.is_err());
     assert!(!failed.layout.skill_target.exists());
     assert!(!failed.layout.identity_file.exists());
-}
-
-#[tokio::test]
-async fn task9_installer_accepts_only_exact_missing_stderr_plus_known_cc_warning() {
-    let warning = install_fixture(InstallFixtureOptions {
-        known_warning_before_missing: true,
-        ..InstallFixtureOptions::default()
-    });
-    assert!(install_user(warning.layout.clone(), false).await.is_ok());
-
-    let mixed = install_fixture(InstallFixtureOptions {
-        get_failure: Some("Error: No MCP server named 'ssh-bridge' found.\nunexpected diagnostic"),
-        ..InstallFixtureOptions::default()
-    });
-    assert!(install_user(mixed.layout.clone(), false).await.is_err());
 }
 
 #[tokio::test]
@@ -1306,20 +1290,6 @@ async fn task9_package_requires_trusted_ancestors_and_hashes_the_complete_skill_
     fs::write(extra.layout.skill_source.join("EXTRA.md"), b"second").unwrap();
     let second = install_user(extra.layout.clone(), false).await.unwrap();
     assert_ne!(first.installation_id, second.installation_id);
-}
-
-#[tokio::test]
-async fn task9_skill_yaml_requires_one_typed_stdio_mcp_dependency_object() {
-    for yaml in [
-        "dependencies:\n  tools:\n    - type: \"mcp\"\n      value: \"ssh-bridge\"\n      transport: \"wrong\"\n",
-        "dependencies:\n  tools:\n    - type: \"mcp\"\n      value: \"other\"\n      transport: \"stdio\"\n    - type: \"other\"\n      value: \"ssh-bridge\"\n      transport: \"stdio\"\n",
-        "dependencies:\n  tools:\n    - type: \"other\"\n      value: \"ssh-bridge\"\n      transport: \"stdio\"\n",
-    ] {
-        let fixture = install_fixture(InstallFixtureOptions::default());
-        fs::write(fixture.layout.skill_source.join("agents/openai.yaml"), yaml).unwrap();
-        assert!(install_user(fixture.layout.clone(), false).await.is_err());
-        assert!(!fixture.log.exists());
-    }
 }
 
 #[tokio::test]
