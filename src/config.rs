@@ -442,6 +442,7 @@ pub(crate) fn validate_secure_existing_ancestors(path: &Path) -> BridgeResult<()
         let root_uid = fs::symlink_metadata("/").map_err(BridgeError::io)?.uid();
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
         let mut resolved = PathBuf::from("/");
+        let mut below_private_user_ancestor = false;
         for component in parent.components() {
             match component {
                 Component::RootDir | Component::CurDir => continue,
@@ -470,10 +471,16 @@ pub(crate) fn validate_secure_existing_ancestors(path: &Path) -> BridgeResult<()
             let trusted_tmp = resolved == Path::new("/tmp")
                 && metadata.uid() == root_uid
                 && metadata.mode() & 0o1000 != 0;
-            if metadata.mode() & 0o022 != 0 && !trusted_tmp {
+            if metadata.mode() & 0o022 != 0 && !trusted_tmp
+                && !(below_private_user_ancestor && metadata.uid() == current_uid)
+            {
                 return Err(BridgeError::invalid_config(
                     "configuration path ancestors must not be writable by group or other users",
                 ));
+            }
+            if !below_private_user_ancestor {
+                below_private_user_ancestor =
+                    metadata.uid() == current_uid && metadata.mode() & 0o077 == 0;
             }
         }
     }
