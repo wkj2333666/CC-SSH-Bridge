@@ -217,8 +217,8 @@ async fn uninstall_preflight(
 }
 
 fn validate_install_destinations(resolved: &ResolvedInstall) -> BridgeResult<()> {
-    crate::config::validate_secure_existing_ancestors(&resolved.layout.skill_target)?;
-    crate::config::validate_secure_existing_ancestors(&resolved.layout.identity_file)?;
+    validate_trusted_ancestors(&resolved.layout.skill_target)?;
+    validate_trusted_ancestors(&resolved.layout.identity_file)?;
     Ok(())
 }
 
@@ -235,7 +235,7 @@ fn install_lock_path(resolved: &ResolvedInstall) -> BridgeResult<PathBuf> {
 
 async fn acquire_install_lock(resolved: &ResolvedInstall) -> BridgeResult<InstallLock> {
     let path = install_lock_path(resolved)?;
-    crate::config::validate_secure_existing_ancestors(&path)?;
+    validate_trusted_ancestors(&path)?;
     tokio::task::spawn_blocking(move || {
         let mut options = fs::OpenOptions::new();
         options
@@ -618,6 +618,7 @@ fn ensure_destination_directory(path: &Path, created: &mut Vec<PathBuf>) -> Brid
     let current_uid = unsafe { libc::geteuid() };
     let root_uid = fs::symlink_metadata("/").map_err(BridgeError::io)?.uid();
     let mut resolved = PathBuf::from("/");
+    let mut below_private_user_ancestor = false;
     for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => continue,
@@ -656,10 +657,17 @@ fn ensure_destination_directory(path: &Path, created: &mut Vec<PathBuf>) -> Brid
         let trusted_tmp = resolved == Path::new("/tmp")
             && metadata.uid() == root_uid
             && metadata.mode() & 0o1000 != 0;
-        if metadata.mode() & 0o022 != 0 && !trusted_tmp {
+        if metadata.mode() & 0o022 != 0
+            && !trusted_tmp
+            && !(below_private_user_ancestor && metadata.uid() == current_uid)
+        {
             return Err(BridgeError::invalid_config(
                 "installation destination ancestors must not be writable by group or other users",
             ));
+        }
+        if !below_private_user_ancestor {
+            below_private_user_ancestor =
+                metadata.uid() == current_uid && metadata.mode() & 0o077 == 0;
         }
     }
     Ok(())
@@ -955,6 +963,13 @@ async fn cc_get(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
             "`claude mcp get` failed; it was not classified as not-found",
         ));
     }
+    // If the output is from a project-scoped or pending entry, treat as absent
+    // for user-scoped install purposes
+    if let Ok(text) = std::str::from_utf8(&output.stdout) {
+        if text.contains("Project config") || text.contains("Pending approval") {
+            return Ok(Presence::Absent);
+        }
+    }
     if !mcp_matches(&output.stdout, &resolved.layout.binary)? {
         return Err(BridgeError::invalid_config(
             "an MCP server named ssh-bridge has a different configuration",
@@ -974,7 +989,11 @@ fn mcp_matches(stdout: &[u8], binary: &Path) -> BridgeResult<bool> {
     let Ok(text) = std::str::from_utf8(stdout) else {
         return Ok(false);
     };
-    // Parse "Command: <path>" from claude mcp get output
+    // Project-scoped or pending entries are not user-scoped; they don't match our install
+    if text.contains("Project config") || text.contains("Pending approval") {
+        return Ok(false);
+    }
+    // Parse "Command: <path>" from claude mcp get output for user-scoped entries
     let Some(command_line) = text
         .lines()
         .find(|line| line.trim_start().starts_with("Command: "))
@@ -1230,7 +1249,11 @@ fn validate_trusted_ancestors(path: &Path) -> BridgeResult<()> {
                 ));
             }
         }
-        let metadata = fs::symlink_metadata(&resolved).map_err(BridgeError::io)?;
+        let metadata = match fs::symlink_metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(BridgeError::io(error)),
+        };
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(BridgeError::invalid_config(
                 "installation source ancestors must be real directories",

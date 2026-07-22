@@ -866,7 +866,8 @@ fn read_bounded_local_file(path: &Path, maximum: u64) -> BridgeResult<Vec<u8>> {
 
 async fn run_install(arguments: InstallArgs) -> BridgeResult<()> {
     debug_assert!(arguments.user, "Clap requires --user");
-    let report = install_user(InstallLayout::discover()?, arguments.apply).await?;
+    let layout = InstallLayout::discover()?;
+    let report = install_user(layout, arguments.apply).await?;
     let value = serde_json::to_value(report)
         .map_err(|error| BridgeError::io(format!("cannot render install plan: {error}")))?;
     print_json(&value)
@@ -983,6 +984,7 @@ pub(super) fn ensure_secure_absolute_directory(path: &Path) -> BridgeResult<Vec<
     let root_uid = fs::symlink_metadata("/").map_err(BridgeError::io)?.uid();
     let mut resolved = PathBuf::from("/");
     let mut created = Vec::new();
+    let mut below_private_user_ancestor = false;
     for component in path.components() {
         match component {
             Component::RootDir => continue,
@@ -1019,14 +1021,21 @@ pub(super) fn ensure_secure_absolute_directory(path: &Path) -> BridgeResult<Vec<
                 "configuration path ancestors must be owned by root or the current user",
             ));
         }
-        let writable = metadata.mode() & 0o022 != 0;
         let trusted_tmp = resolved == Path::new("/tmp")
             && metadata.uid() == root_uid
             && metadata.mode() & 0o1000 != 0;
-        if writable && !trusted_tmp {
+        let writable = metadata.mode() & 0o022 != 0;
+        if writable
+            && !trusted_tmp
+            && !(below_private_user_ancestor && metadata.uid() == current_uid)
+        {
             return Err(BridgeError::invalid_config(
                 "configuration path ancestors must not be writable by group or other users",
             ));
+        }
+        if !below_private_user_ancestor {
+            below_private_user_ancestor =
+                metadata.uid() == current_uid && metadata.mode() & 0o077 == 0;
         }
     }
     Ok(created)
