@@ -965,10 +965,10 @@ async fn cc_get(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
     }
     // If the output is from a project-scoped or pending entry, treat as absent
     // for user-scoped install purposes
-    if let Ok(text) = std::str::from_utf8(&output.stdout) {
-        if text.contains("Project config") || text.contains("Pending approval") {
-            return Ok(Presence::Absent);
-        }
+    if let Ok(text) = std::str::from_utf8(&output.stdout)
+        && (text.contains("Project config") || text.contains("Pending approval"))
+    {
+        return Ok(Presence::Absent);
     }
     if !mcp_matches(&output.stdout, &resolved.layout.binary)? {
         return Err(BridgeError::invalid_config(
