@@ -303,6 +303,25 @@ impl SshRunner {
                 ));
             }
         };
+        if session_result.timed_out {
+            let mut error =
+                BridgeError::new(ErrorCode::CommandTimeout, "remote command timed out", false);
+            error.details.host = Some(request.host.clone());
+            error.details.elapsed_ms = Some(elapsed_ms(operation_started.elapsed()));
+            error.details.exit_status = Some(session_result.status);
+            error.details.bytes_seen = Some(
+                u64::try_from(session_result.stdout.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(u64::try_from(session_result.stderr.len()).unwrap_or(u64::MAX)),
+            );
+            error.details.remote_process_may_continue = Some(false);
+            return Err(attach_selected_context(
+                error,
+                &request.host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
         if session_result.stdout_truncated || session_result.stderr_truncated {
             let mut error = BridgeError::new(
                 ErrorCode::OutputLimit,

@@ -336,11 +336,12 @@ where
     W: Write + Send + 'static,
 {
     let result = execute_request(&shared, &spec, &control);
-    if let Ok((status, stdout_truncated, stderr_truncated)) = result {
+    if let Ok((status, stdout_truncated, stderr_truncated, timed_out)) = result {
         let payload = format!(
-            "{status}\n{}\n{}\n",
+            "{status}\n{}\n{}\n{}\n",
             u8::from(stdout_truncated),
-            u8::from(stderr_truncated)
+            u8::from(stderr_truncated),
+            u8::from(timed_out)
         )
         .into_bytes();
         let _ = send_frame(
@@ -363,7 +364,7 @@ fn execute_request<W>(
     shared: &Arc<Shared<W>>,
     spec: &RequestSpec,
     control: &Arc<RequestControl>,
-) -> Result<(i32, bool, bool), String>
+) -> Result<(i32, bool, bool, bool), String>
 where
     W: Write + Send + 'static,
 {
@@ -456,12 +457,14 @@ where
         thread::spawn(move || write_stdin(stdin, &input))
     });
     let watchdog_done = Arc::new((Mutex::new(false), Condvar::new()));
+    let timed_out = Arc::new(AtomicBool::new(false));
     let timeout = spec.timeout;
     let watchdog = if timeout.is_zero() {
         None
     } else {
         let watchdog_done = Arc::clone(&watchdog_done);
         let watchdog_control = Arc::clone(control);
+        let watchdog_timed_out = Arc::clone(&timed_out);
         Some(thread::spawn(move || {
             let (done_lock, done_signal) = &*watchdog_done;
             let done = done_lock
@@ -471,6 +474,7 @@ where
                 .wait_timeout_while(done, timeout, |done| !*done)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !*done {
+                watchdog_timed_out.store(true, Ordering::Release);
                 watchdog_control.cancel();
             }
         }))
@@ -490,7 +494,12 @@ where
     let stdout_truncated = stdout_thread.join().unwrap_or(true);
     let stderr_truncated = stderr_thread.join().unwrap_or(true);
     control.process_group.store(0, Ordering::Release);
-    Ok((exit_status(status), stdout_truncated, stderr_truncated))
+    Ok((
+        exit_status(status),
+        stdout_truncated,
+        stderr_truncated,
+        timed_out.load(Ordering::Acquire),
+    ))
 }
 
 fn write_stdin(mut stdin: ChildStdin, input: &[u8]) -> bool {

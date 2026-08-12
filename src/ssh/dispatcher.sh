@@ -410,10 +410,12 @@ exit 0"
     fi
     send_text READY "$run_id" started
     run_watchdog=
+    run_timeout_marker=$run_dir/timed-out
     case "$run_timeout_ms" in ''|*[!0-9]*) run_timeout_ms=0 ;; esac
     if [ "$run_timeout_ms" -gt 0 ]; then
         run_timeout_seconds=$(( (run_timeout_ms + 999) / 1000 ))
         ( sleep "$run_timeout_seconds"; if kill -0 "$run_pid" 2>/dev/null; then
+            : >"$run_timeout_marker"
             kill -TERM -"$run_pid" 2>/dev/null || true
             sleep 1
             kill -KILL -"$run_pid" 2>/dev/null || true
@@ -442,10 +444,12 @@ exit 0"
     fi
     run_stdout_truncated=0
     run_stderr_truncated=0
+    run_timed_out=0
     [ -e "$run_stdout_marker" ] && run_stdout_truncated=1
     [ -e "$run_stderr_marker" ] && run_stderr_truncated=1
+    [ -e "$run_timeout_marker" ] && run_timed_out=1
     run_exit_file=$run_dir/exit
-    printf '%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" >"$run_exit_file"
+    printf '%s\n%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" "$run_timed_out" >"$run_exit_file"
     send_file EXIT "$run_id" "$run_exit_file"
     rm -rf "$run_dir"
 }
