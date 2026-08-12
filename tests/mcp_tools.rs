@@ -581,9 +581,16 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         .await;
     assert_remote_context(&patched, remote.path());
     assert_eq!(patched["structuredContent"]["status"], "applied");
-    assert_eq!(
-        std::fs::read(remote.path().join("created.txt")).unwrap(),
-        b"PATCH_SURFACE\n"
+    let cached = session
+        .call(
+            "remote_read",
+            json!({"host":"dev","paths":[absolute(remote.path(), "created.txt")],"max_bytes":4096}),
+        )
+        .await;
+    assert!(text_json(&cached).to_string().contains("PATCH_SURFACE"));
+    assert!(
+        !remote.path().join("created.txt").exists(),
+        "buffered mutation must not reach the remote before a barrier"
     );
     assert!(!remote.path().join("SHOULD_NOT_EXIST").exists());
     assert!(!std::path::Path::new("SHOULD_NOT_EXIST").exists());
@@ -1265,9 +1272,17 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     )
     .await;
     assert_eq!(written["structuredContent"]["status"], "applied");
-    assert_eq!(
-        std::fs::read(remote.path().join("created.txt")).unwrap(),
-        b"WRITE_SENTINEL\n"
+    assert!(!remote.path().join("created.txt").exists());
+    let cached_write = call_json(
+        &tools,
+        "remote_read",
+        json!({"host":"dev", "paths":[absolute(remote.path(), "created.txt")], "max_bytes":4096}),
+    )
+    .await;
+    assert!(
+        text_json(&cached_write)
+            .to_string()
+            .contains("WRITE_SENTINEL")
     );
 
     let patched = call_json(
@@ -1284,10 +1299,18 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     .await;
     assert_eq!(patched["structuredContent"]["status"], "applied");
     assert_eq!(patched["structuredContent"]["changed_count"], 1);
-    assert_eq!(
-        std::fs::read(remote.path().join("created.txt")).unwrap(),
-        b"PATCH_SENTINEL\n"
+    let cached_patch = call_json(
+        &tools,
+        "remote_read",
+        json!({"host":"dev", "paths":[absolute(remote.path(), "created.txt")], "max_bytes":4096}),
+    )
+    .await;
+    assert!(
+        text_json(&cached_patch)
+            .to_string()
+            .contains("PATCH_SENTINEL")
     );
+    assert!(!remote.path().join("created.txt").exists());
 
     let patch_error = call_json(
         &tools,
@@ -1695,10 +1718,6 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "value={value:?}: {result}");
-        assert_eq!(
-            std::fs::read(remote.path().join(&path)).unwrap(),
-            value.as_bytes()
-        );
         let (argv, command) = only_command_record(&log);
         let shape = (argv, fixed_script_prefix(&command, " cc-ssh-bridge-op "));
         if let Some(expected) = &write_shape {
@@ -1706,6 +1725,26 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         } else {
             write_shape = Some(shape);
         }
+        let cached = call_json(
+            &tools,
+            "remote_read",
+            json!({"host":"dev","paths":[absolute(remote.path(), &path)],"max_bytes":4096}),
+        )
+        .await;
+        let cached_text = text_json(&cached).to_string();
+        if value.contains('\0') {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+            assert!(
+                cached_text.contains(&encoded),
+                "value={value:?}: {cached_text}"
+            );
+        } else {
+            assert!(
+                cached_text.contains(value),
+                "value={value:?}: {cached_text}"
+            );
+        }
+        assert!(!remote.path().join(&path).exists());
         assert_hostile_marker_absent(remote.path());
     }
 
