@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::{LocalCommandSpec, run_local_command};
+use crate::config::{Config, discover_ssh_aliases_from, migrate_v1_file};
 use crate::error::{BridgeError, BridgeResult};
 
 const MCP_NAME: &str = "ssh-bridge";
@@ -27,6 +28,8 @@ pub struct InstallLayout {
     pub skill_target: PathBuf,
     pub identity_file: PathBuf,
     pub cc_executable: PathBuf,
+    pub config_file: PathBuf,
+    pub ssh_config: PathBuf,
     #[doc(hidden)]
     pub quarantine_delete_failure: Option<usize>,
 }
@@ -56,6 +59,14 @@ impl InstallLayout {
         let state_base = nonempty_environment("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state"));
+        let config_file = nonempty_environment("CC_SSH_BRIDGE_CONFIG")
+            .map(PathBuf::from)
+            .map_or_else(Config::default_path, Ok)?;
+        if !config_file.is_absolute() {
+            return Err(BridgeError::invalid_config(
+                "bridge configuration path must be absolute",
+            ));
+        }
         Ok(Self {
             binary,
             plugin_manifest: bundle.join(".claude-plugin/plugin.json"),
@@ -64,6 +75,8 @@ impl InstallLayout {
             skill_target: home.join(".claude/skills/remote-ssh-ops"),
             identity_file: state_base.join("cc-ssh-bridge/install.toml"),
             cc_executable: find_executable("claude")?,
+            config_file,
+            ssh_config: home.join(".ssh/config"),
             quarantine_delete_failure: None,
         })
     }
@@ -105,7 +118,14 @@ struct InstallPreflight {
     mcp: Presence,
     skill: Presence,
     marker: Presence,
+    config_migration: Option<ConfigMigrationPlan>,
     actions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigMigrationPlan {
+    original_sha256: String,
+    migrated: Config,
 }
 
 struct InstallLock {
@@ -144,6 +164,8 @@ async fn install_preflight(
     validate_install_destinations(&resolved)?;
     let skill = skill_presence(&resolved)?;
     let marker = marker_presence(&resolved)?;
+    let config_migration =
+        inspect_config_migration(&resolved.layout.config_file, &resolved.layout.ssh_config)?;
     if probe_mutations {
         if skill == Presence::Absent {
             probe_absent_destination(&resolved.layout.skill_target)?;
@@ -153,7 +175,7 @@ async fn install_preflight(
         }
     }
     let mcp = cc_get(&resolved).await?;
-    let actions = vec![
+    let mut actions = vec![
         match mcp {
             Presence::Absent => "register MCP ssh-bridge".to_owned(),
             Presence::Matching => "MCP ssh-bridge already matches".to_owned(),
@@ -167,11 +189,15 @@ async fn install_preflight(
             Presence::Matching => "installation identity already matches".to_owned(),
         },
     ];
+    if config_migration.is_some() {
+        actions.insert(0, "migrate bridge configuration from v1 to v2".to_owned());
+    }
     Ok(InstallPreflight {
         resolved,
         mcp,
         skill,
         marker,
+        config_migration,
         actions,
     })
 }
@@ -212,6 +238,7 @@ async fn uninstall_preflight(
         mcp,
         skill,
         marker,
+        config_migration: None,
         actions,
     })
 }
@@ -219,6 +246,7 @@ async fn uninstall_preflight(
 fn validate_install_destinations(resolved: &ResolvedInstall) -> BridgeResult<()> {
     validate_trusted_ancestors(&resolved.layout.skill_target)?;
     validate_trusted_ancestors(&resolved.layout.identity_file)?;
+    crate::config::validate_secure_existing_ancestors(&resolved.layout.config_file)?;
     Ok(())
 }
 
@@ -300,11 +328,15 @@ pub async fn install_user(layout: InstallLayout, apply: bool) -> BridgeResult<In
         mcp,
         skill,
         marker,
+        config_migration,
         actions,
     } = preflight;
 
     let mut journal = InstallJournal::default();
     let applied = async {
+        if let Some(plan) = config_migration.as_ref() {
+            apply_config_migration(&resolved.layout.config_file, plan, &mut journal)?;
+        }
         if mcp == Presence::Absent {
             if cc_get(&resolved).await? != Presence::Absent {
                 return Err(BridgeError::invalid_config(
@@ -363,6 +395,16 @@ pub async fn install_user(layout: InstallLayout, apply: bool) -> BridgeResult<In
             return Err(BridgeError::new(
                 crate::ErrorCode::Io,
                 "installation failed and rollback was incomplete",
+                false,
+            ));
+        }
+        return Err(error);
+    }
+    if let Err(error) = cleanup_config_migration(&mut journal) {
+        if rollback_install(&resolved, &journal).await.is_err() {
+            return Err(BridgeError::new(
+                crate::ErrorCode::Io,
+                "installation cleanup failed and rollback was incomplete",
                 false,
             ));
         }
@@ -558,10 +600,89 @@ async fn rollback_uninstall(
 
 #[derive(Default)]
 struct InstallJournal {
+    config_created: bool,
+    config_written_sha256: Option<String>,
+    config_quarantine: Option<QuarantinedPath>,
     mcp_added: bool,
     skill_created: bool,
     marker_created: bool,
     created_directories: Vec<PathBuf>,
+}
+
+fn inspect_config_migration(
+    config_file: &Path,
+    ssh_config: &Path,
+) -> BridgeResult<Option<ConfigMigrationPlan>> {
+    match fs::symlink_metadata(config_file) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BridgeError::io(error)),
+    }
+    if Config::load(config_file).is_ok() {
+        return Ok(None);
+    }
+    let migrated = migrate_v1_file(config_file)?;
+    let discovered = discover_ssh_aliases_from(ssh_config);
+    for alias in &migrated.explicit_aliases {
+        if discovered.binary_search(alias).is_err() {
+            return Err(BridgeError::invalid_config(format!(
+                "version-1 host alias {alias:?} is missing from the OpenSSH configuration"
+            )));
+        }
+    }
+    Ok(Some(ConfigMigrationPlan {
+        original_sha256: sha256_file(config_file)?,
+        migrated: migrated.config,
+    }))
+}
+
+fn apply_config_migration(
+    config_file: &Path,
+    plan: &ConfigMigrationPlan,
+    journal: &mut InstallJournal,
+) -> BridgeResult<()> {
+    if sha256_file(config_file)? != plan.original_sha256 {
+        return Err(BridgeError::invalid_config(
+            "bridge configuration changed after installation preflight",
+        ));
+    }
+    journal.config_quarantine = Some(quarantine_path(config_file)?);
+    plan.migrated.save_atomic(config_file)?;
+    journal.config_created = true;
+    journal.config_written_sha256 = Some(sha256_file(config_file)?);
+    Ok(())
+}
+
+fn rollback_config_migration(config_file: &Path, journal: &InstallJournal) -> BridgeResult<()> {
+    if journal.config_created {
+        let expected = journal.config_written_sha256.as_deref().ok_or_else(|| {
+            BridgeError::invalid_config("migrated configuration hash was not recorded")
+        })?;
+        match fs::symlink_metadata(config_file) {
+            Ok(_) if sha256_file(config_file)? == expected => {
+                fs::remove_file(config_file).map_err(BridgeError::io)?;
+            }
+            Ok(_) => {
+                return Err(BridgeError::invalid_config(
+                    "migrated configuration changed before rollback",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BridgeError::io(error)),
+        }
+    }
+    if let Some(quarantine) = journal.config_quarantine.as_ref() {
+        restore_quarantine(quarantine)?;
+    }
+    Ok(())
+}
+
+fn cleanup_config_migration(journal: &mut InstallJournal) -> BridgeResult<()> {
+    if let Some(quarantine) = journal.config_quarantine.as_ref() {
+        fs::remove_file(&quarantine.quarantine).map_err(BridgeError::io)?;
+        journal.config_quarantine = None;
+    }
+    Ok(())
 }
 
 async fn rollback_install(
@@ -594,6 +715,9 @@ async fn rollback_install(
             }
             Err(_) => failed = true,
         }
+    }
+    if rollback_config_migration(&resolved.layout.config_file, journal).is_err() {
+        failed = true;
     }
     for directory in journal.created_directories.iter().rev() {
         if let Err(error) = fs::remove_dir(directory)
@@ -868,6 +992,8 @@ fn resolve_layout(layout: InstallLayout) -> BridgeResult<ResolvedInstall> {
             skill_target: layout.skill_target,
             identity_file: layout.identity_file,
             cc_executable,
+            config_file: layout.config_file,
+            ssh_config: layout.ssh_config,
             quarantine_delete_failure: layout.quarantine_delete_failure,
         },
         identity,
@@ -1482,7 +1608,15 @@ fn nonempty_environment(name: &str) -> Option<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::advance_private_source_boundary;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::{
+        InstallJournal, advance_private_source_boundary, apply_config_migration,
+        inspect_config_migration, rollback_config_migration,
+    };
 
     #[test]
     fn private_source_boundary_never_trusts_foreign_or_writable_root_owned_descendants() {
@@ -1509,5 +1643,53 @@ mod tests {
             advance_private_source_boundary(0, 0o1777, 1000, 0, false, true),
             Some(false)
         );
+    }
+
+    #[test]
+    fn v1_config_migration_is_alias_checked_atomic_and_exactly_rollbackable() {
+        let temporary = TempDir::new().unwrap();
+        let config = temporary.path().join("config.toml");
+        let ssh_config = temporary.path().join("ssh_config");
+        let original = br#"
+version = 1
+[limits]
+command_timeout_ms = 123456
+[hosts.nkai]
+root = "/home/wkj"
+"#;
+        fs::write(&config, original).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&ssh_config, "Host nkai\n").unwrap();
+
+        let plan = inspect_config_migration(&config, &ssh_config)
+            .unwrap()
+            .unwrap();
+        let mut journal = InstallJournal::default();
+        apply_config_migration(&config, &plan, &mut journal).unwrap();
+
+        let migrated = crate::config::Config::load(&config).unwrap();
+        assert_eq!(migrated.version, 2);
+        assert_eq!(migrated.limits.command_timeout_ms, 123_456);
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        rollback_config_migration(&config, &journal).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), original);
+    }
+
+    #[test]
+    fn v1_config_alias_missing_from_openssh_is_rejected_without_writes() {
+        let temporary = TempDir::new().unwrap();
+        let config = temporary.path().join("config.toml");
+        let ssh_config = temporary.path().join("ssh_config");
+        let original = b"version = 1\n[hosts.missing]\nroot = \"/\"\n";
+        fs::write(&config, original).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&ssh_config, "Host nkai\n").unwrap();
+
+        assert!(inspect_config_migration(&config, &ssh_config).is_err());
+        assert_eq!(fs::read(&config).unwrap(), original);
     }
 }

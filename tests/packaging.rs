@@ -86,6 +86,25 @@ fn mcp_manifest_launches_the_packaged_rust_binary() {
 }
 
 #[test]
+fn example_config_is_v2_limits_only() {
+    let example = read_text("config.example.toml");
+    assert!(example.contains("version = 2"));
+    for forbidden in [
+        "[hosts",
+        "root =",
+        "description =",
+        "read_only",
+        "global_concurrency",
+        "per_host_concurrency",
+    ] {
+        assert!(
+            !example.contains(forbidden),
+            "example retains removed field {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn release_workflow_builds_and_packages_all_common_targets() {
     let workflow = read_text(".github/workflows/release.yml");
     for main_target in [

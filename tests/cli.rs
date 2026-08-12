@@ -769,6 +769,8 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
     );
     fs::write(&claude, script).unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_file = private.path().join("config.toml");
+    let ssh_config = private.path().join("ssh_config");
     InstallFixture {
         _private: private,
         layout: InstallLayout {
@@ -779,6 +781,8 @@ fn install_fixture(options: InstallFixtureOptions) -> InstallFixture {
             skill_target,
             identity_file,
             cc_executable: claude,
+            config_file,
+            ssh_config,
             quarantine_delete_failure: None,
         },
         cc_state,

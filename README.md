@@ -119,6 +119,7 @@ The installer:
 - accepts only this canonical Rust package layout;
 - refuses an unrelated MCP entry or Skill target;
 - validates trusted source ancestors and the complete Skill tree;
+- migrates a secure version-1 bridge config to version 2 only after every former host alias is present in OpenSSH, with exact rollback on a later install failure;
 - serializes bridge-managed install/uninstall transactions with a private user lock;
 - journals mutations and compensates a partially successful Claude Code CLI call;
 - stores a private content-hashed installation identity;
