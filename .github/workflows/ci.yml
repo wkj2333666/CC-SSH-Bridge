@@ -26,17 +26,45 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Restore pinned Rust toolchain cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-toolchain-${{ env.RUST_TOOLCHAIN }}-quality-components
 
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"
 
+      - name: Restore shared Cargo dependency cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Restore ripgrep tool cache
+        id: ripgrep-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.local/bin/rg
+          key: ${{ runner.os }}-${{ runner.arch }}-ripgrep-14.1.0
+
       - name: Install command-line test dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ripgrep
+          if [ ! -x "$HOME/.local/bin/rg" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ripgrep
+            mkdir -p "$HOME/.local/bin"
+            install -m 0755 /usr/bin/rg "$HOME/.local/bin/rg"
+          fi
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: Check formatting
         run: cargo +"$RUST_TOOLCHAIN" fmt --all -- --check
