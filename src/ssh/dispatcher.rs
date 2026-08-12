@@ -1,6 +1,10 @@
 use crate::error::BridgeResult;
 use crate::quote::shell_word;
 
+#[allow(
+    dead_code,
+    reason = "the bounded protocol identifier is asserted by dispatcher fixtures before runtime negotiation consumes it"
+)]
 pub(crate) const DISPATCHER_PROTOCOL_VERSION: &str = "cc-ssh-dispatcher/1";
 pub(crate) const DISPATCHER_SCRIPT: &str = include_str!("dispatcher.sh");
 
