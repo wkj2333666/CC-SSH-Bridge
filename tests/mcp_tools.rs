@@ -79,7 +79,7 @@ fn fake_remote_tools_with_options(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     for (key, value) in extra {
@@ -1282,7 +1282,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         "remote_apply_patch",
         json!({
             "host":"dev",
-            "patch":"--- a/created.txt\n+++ b/created.txt\n@@ -1 +1 @@\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n"
+            "patch":format!(
+                "--- {path}\n+++ {path}\n@@ -1 +1 @@\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n",
+                path=absolute(remote.path(), "created.txt")
+            )
         }),
     )
     .await;
@@ -1360,7 +1363,7 @@ async fn task8_error_rendering_is_direct_bounded_and_does_not_serialize_bridge_e
 }
 
 #[tokio::test]
-async fn task8_retention_hosts_fallback_is_truthful_and_pageable() {
+async fn task8_compact_hosts_response_ignores_removed_profile_detail() {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -1400,42 +1403,16 @@ async fn task8_retention_hosts_fallback_is_truthful_and_pageable() {
     let mut session = ProtocolSession::start_with_frame(tools, minimum_frame).await;
     let rendered = session.call("remote_hosts", json!({})).await;
     assert_eq!(rendered["structuredContent"]["host_count"], 7);
-    assert_eq!(rendered["structuredContent"]["truncated"], true);
-    assert_eq!(rendered["structuredContent"]["detail_retained"], true);
-    let output_ref = rendered["structuredContent"]["output_ref"]
-        .as_str()
-        .unwrap();
-    let paged = session
-        .call(
-            "remote_output_read",
-            json!({
-                "output_ref":output_ref,
-                "stream":"stdout",
-                "offset":0,
-                "max_bytes":1024
-            }),
-        )
-        .await;
-    let paged_text = text_json(&paged);
-    assert_eq!(paged_text["remote"], true);
-    assert_eq!(paged_text["aggregate"], "hosts");
-    assert_eq!(paged_text["source_count"], 7);
-    assert_eq!(paged_text["output_ref"], output_ref);
-    assert_eq!(paged_text["offset"], 0);
-    assert!(paged_text["next_offset"].as_u64().unwrap() > 0);
-    let page = bridge
-        .output_read(
-            cc_ssh_bridge::remote::OutputReadRequest {
-                output_ref: output_ref.to_owned(),
-                stream: cc_ssh_bridge::output::StreamKind::Stdout,
-                offset: 0,
-                max_bytes: 1_024,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert!(page.data.value.contains("DETAIL-0"));
+    assert_eq!(rendered["structuredContent"]["truncated"], false);
+    assert!(
+        rendered["structuredContent"]
+            .get("detail_retained")
+            .is_none()
+    );
+    assert!(rendered["structuredContent"].get("output_ref").is_none());
+    let presentation = text_json(&rendered);
+    assert_eq!(presentation["hosts"].as_array().unwrap().len(), 7);
+    assert!(!presentation.to_string().contains("DETAIL-"));
     session.close().await;
 }
 
@@ -1830,6 +1807,7 @@ fn five_host_tools_fixture(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     let runner = Arc::new(
@@ -1875,7 +1853,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
     let mut session =
         ProtocolSession::start_with_limits(tools, cc_ssh_bridge::MAX_FRAME_BYTES, 8).await;
     let started = Instant::now();
-    for (index, (host, root)) in root_paths.iter().enumerate() {
+    for (index, (host, _root)) in root_paths.iter().enumerate() {
         let id = 100 + index as u64;
         session
             .send(json!({
@@ -1907,10 +1885,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
         let result = &responses[&id]["result"];
         assert_eq!(result["isError"], Value::Null, "host={host}: {result}");
         assert_eq!(result["structuredContent"]["host"], host.as_str());
-        assert_eq!(
-            result["structuredContent"]["physical_root"],
-            root.to_string_lossy().as_ref()
-        );
+        assert_eq!(result["structuredContent"]["physical_root"], "/");
         let text = text_json(result);
         assert!(
             json_contains_exact_encoded_bytes(&text, format!("HOST-{index}").as_bytes()),
@@ -2000,6 +1975,7 @@ fn cancellation_tools_fixture() -> (
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("10"),
@@ -2319,7 +2295,7 @@ fn retention_models_fixture(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     let runner = Arc::new(
         SshRunner::with_executable(
@@ -2351,7 +2327,6 @@ async fn retain_all_large_models(
 ) -> Vec<Value> {
     let mut retained = Vec::new();
     for (name, count_field, expected_count, arguments) in [
-        ("remote_hosts", "host_count", 1, json!({})),
         ("remote_list", "entry_count", 1_000, list_args),
         ("remote_stat", "entry_count", 256, stat_args),
         ("remote_search", "match_count", 500, search_args),
@@ -2381,12 +2356,12 @@ async fn retain_all_large_models(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task8_output_rss_large_host_list_stat_search_models_all_force_retention() {
+async fn task8_output_rss_large_list_stat_search_models_all_force_retention() {
     let root = tempfile::TempDir::new().unwrap();
     let (_runtime, tools, list_args, stat_args, search_args) =
         retention_models_fixture(root.path());
     let retained = retain_all_large_models(&tools, list_args, stat_args, search_args).await;
-    assert_eq!(retained.len(), 4);
+    assert_eq!(retained.len(), 3);
 }
 
 #[test]

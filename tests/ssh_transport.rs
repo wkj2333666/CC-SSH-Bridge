@@ -704,7 +704,7 @@ fn task78_physical_root_byte_bound_bash_version_and_spoofed_values_are_enforced(
 }
 
 #[tokio::test]
-async fn task78_exact_root_and_bash_version_survive_the_real_capability_cache() {
+async fn task78_large_cwd_and_bash_version_survive_the_real_capability_cache() {
     // Keep the integration command below well under execve's aggregate argv
     // limit on GitHub-hosted runners; the exact 64 KiB parser boundary is
     // covered by the direct probe tests immediately above.
@@ -722,7 +722,7 @@ async fn task78_exact_root_and_bash_version_survive_the_real_capability_cache() 
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("echo-command"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), OsString::from(&root)),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("bash")),
         (
             OsString::from("FAKE_SSH_BASH_VERSION"),
@@ -731,7 +731,7 @@ async fn task78_exact_root_and_bash_version_survive_the_real_capability_cache() 
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     let runner = SshRunner::with_executable(
-        Arc::new(config_with_host("dev", &root)),
+        Arc::new(config_with_host("dev", "/")),
         runtime,
         store,
         fake_ssh_path(),
@@ -751,7 +751,7 @@ async fn task78_exact_root_and_bash_version_survive_the_real_capability_cache() 
                     error.code, error.message
                 )
             });
-        assert_eq!(result.physical_root, root);
+        assert_eq!(result.physical_root, "/");
         assert_eq!(
             result.shell.shell,
             ShellKind::Bash {
@@ -1515,10 +1515,13 @@ fn task3_runner(
     let base = TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
     let store = Arc::new(OutputStore::with_ttl(&runtime, ttl).unwrap());
-    let environment = environment
+    let mut environment: BTreeMap<OsString, OsString> = environment
         .iter()
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
         .collect();
+    environment
+        .entry(OsString::from("FAKE_SSH_ROOT"))
+        .or_insert_with(|| OsString::from("/"));
     let runner = Arc::new(
         SshRunner::with_executable(
             task3_config(hosts, limits),
@@ -2437,7 +2440,7 @@ async fn local_deadline_and_gnu_timeout_status_are_command_timeouts() {
 fn assert_task78_selected_context(error: &BridgeError, expected_code: ErrorCode) {
     assert_eq!(error.code, expected_code, "{error:?}");
     assert_eq!(error.details.host.as_deref(), Some("dev"));
-    assert_eq!(error.details.physical_root.as_deref(), Some("/srv/project"));
+    assert_eq!(error.details.physical_root.as_deref(), Some("/"));
     let shell = error
         .details
         .shell
@@ -2469,7 +2472,7 @@ async fn task78_selected_remote_context_is_attached_to_exit_timeout_cancel_and_o
         .await
         .unwrap();
     assert_eq!(result.status, 255);
-    assert_eq!(result.physical_root, "/srv/project");
+    assert_eq!(result.physical_root, "/");
     assert_eq!(result.shell.shell, ShellKind::PosixSh);
 
     let timed_out = task3_runner(
@@ -3452,10 +3455,7 @@ async fn task8_internal_capture_quota_is_shared_with_a_committed_command_spool()
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote_root.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     let runner = Arc::new(
         SshRunner::with_executable(
@@ -3473,7 +3473,7 @@ async fn task8_internal_capture_quota_is_shared_with_a_committed_command_spool()
     let bridge = RemoteBridge::new(runner);
     let request = StatRequest {
         host: "dev".to_owned(),
-        paths: vec!["a".to_owned()],
+        paths: vec![remote_root.path().join("a").to_string_lossy().into_owned()],
     };
     bridge
         .stat(request.clone(), CancellationToken::new())
