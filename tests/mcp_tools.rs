@@ -1731,19 +1731,12 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             json!({"host":"dev","paths":[absolute(remote.path(), &path)],"max_bytes":4096}),
         )
         .await;
-        let cached_text = text_json(&cached).to_string();
-        if value.contains('\0') {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
-            assert!(
-                cached_text.contains(&encoded),
-                "value={value:?}: {cached_text}"
-            );
-        } else {
-            assert!(
-                cached_text.contains(value),
-                "value={value:?}: {cached_text}"
-            );
-        }
+        let cached_text = text_json(&cached);
+        assert!(
+            json_contains_exact_string(&cached_text, value)
+                || json_contains_exact_encoded_bytes(&cached_text, value.as_bytes()),
+            "value={value:?}: {cached_text}"
+        );
         assert!(!remote.path().join(&path).exists());
         assert_hostile_marker_absent(remote.path());
     }
