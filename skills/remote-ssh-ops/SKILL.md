@@ -11,6 +11,8 @@ Keep Claude Code, credentials, approvals, and the bridge on the local machine. E
 
 Use only configured aliases returned by `remote_hosts`. Never construct raw SSH commands or invent a hostname. The bridge owns host resolution, transport quoting, capability probes, limits, and shell selection.
 
+Every MCP path is an explicit absolute remote path. Never infer it from the SSH home directory, a configured profile root, a previous call, or the current task.
+
 The bridge keeps one locally owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities; warm requests send one framed command with no per-request `ssh -G`, root observation, or physical-root guard. No Claude Code or helper is installed on the server. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 
 ## Default workflow
@@ -23,14 +25,14 @@ The bridge keeps one locally owned persistent SSH session per configured alias a
 
 ## Tool contract
 
-- `remote_list`: `{host, path?, depth?, include_hidden?, max_entries?}`.
-- `remote_stat`: `{host, paths:[...]}`; `paths` is plural.
-- `remote_search`: `{host, query, path?, globs?, max_results?, binary?}`. `query` is a case-sensitive literal, not a regex. Use `globs`, not invented exclude or kind fields.
-- `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; reads are line-based and bounded.
+- `remote_list`: `{host, path, depth?, include_hidden?, max_entries?}`; `path` must be an absolute remote path.
+- `remote_stat`: `{host, paths:[...]}`; `paths` is plural and every item must be absolute.
+- `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. Use `globs`, not invented exclude or kind fields.
+- `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; every path is absolute and reads are line-based and bounded.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
-- `remote_apply_patch`: `{host, patch}`; `a/...` and `b/...` paths are relative to the configured remote root, with no cwd field.
-- `remote_write`: `{host, path, content, encoding, mode}`. Prefer patching. For replacement, supply the observed SHA-256 when available.
-- `remote_run`: `{host, command, cwd?, shell?, timeout_ms?, stdin?}`. `command` is one shell command string, not argv or a background job. stdin is an object `{encoding:"utf8"|"base64", value}`.
+- `remote_apply_patch`: `{host, patch}`; unified diff headers use absolute remote paths or `/dev/null`, with no cwd field.
+- `remote_write`: `{host, path, content, encoding, mode}`; `path` must be absolute. Prefer patching. For replacement, supply the observed SHA-256 when available.
+- `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string, not argv or a background job. stdin is an object `{encoding:"utf8"|"base64", value}`.
 
 All schemas are closed. Follow the live schema if it differs from this quick reference.
 

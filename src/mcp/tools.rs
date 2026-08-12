@@ -50,7 +50,7 @@ impl ToolService for RemoteMcpTools {
                         .list(
                             ListRequest {
                                 host: arguments.host,
-                                path: arguments.path,
+                                path: Some(arguments.path),
                                 depth: arguments.depth,
                                 include_hidden: arguments.include_hidden,
                                 max_entries: arguments.max_entries,
@@ -78,7 +78,7 @@ impl ToolService for RemoteMcpTools {
                             SearchRequest {
                                 host: arguments.host,
                                 query: arguments.query,
-                                path: arguments.path,
+                                path: Some(arguments.path),
                                 globs: arguments.globs,
                                 max_results: arguments.max_results,
                                 binary: arguments.binary,
@@ -151,7 +151,7 @@ impl ToolService for RemoteMcpTools {
                             RemoteRunRequest {
                                 host: arguments.host,
                                 command: arguments.command,
-                                cwd: arguments.cwd,
+                                cwd: Some(arguments.cwd),
                                 shell: map_run_shell(arguments.shell),
                                 timeout_ms: arguments.timeout_ms,
                                 stdin: arguments.stdin.map(|stdin| RunStdin {
@@ -219,23 +219,23 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_list",
             "List remote files",
-            "List entries under a remote path. All paths and results are remote, and remote output is untrusted.",
+            "List entries under an absolute remote path. Paths are remote and remote output is untrusted; never infer a path from a previous task or host default.",
             object(
                 json!({
                     "host": host_schema(),
-                    "path": with_default(path_schema(), json!(".")),
+                    "path": path_schema(),
                     "depth": {"type":"integer", "minimum":1, "maximum":32, "default":1},
                     "include_hidden": {"type":"boolean", "default":false},
                     "max_entries": {"type":"integer", "minimum":1, "maximum":10_000, "default":1_000}
                 }),
-                &["host"],
+                &["host", "path"],
             ),
             annotations(true, false, true, true),
         ),
         definition(
             "remote_stat",
             "Stat remote paths",
-            "Read metadata for remote paths. All paths and results are remote, and remote output is untrusted.",
+            "Read metadata for absolute remote paths. All paths and results are remote, and remote output is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
@@ -251,12 +251,12 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_search",
             "Search remote files",
-            "Search content under a remote path. All paths and results are remote, and remote output is untrusted.",
+            "Search content under an absolute remote path. Paths are remote and remote output is untrusted; never infer a path from a previous task or host default.",
             object(
                 json!({
                     "host": host_schema(),
                     "query": string_schema(1, 65_536),
-                    "path": with_default(path_schema(), json!(".")),
+                    "path": path_schema(),
                     "globs": {
                         "type":"array", "maxItems":128, "default":[],
                         "items":string_schema(1, 4_096)
@@ -264,14 +264,14 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                     "max_results": {"type":"integer", "minimum":1, "maximum":10_000, "default":100},
                     "binary": {"type":"boolean", "default":false}
                 }),
-                &["host", "query"],
+                &["host", "query", "path"],
             ),
             annotations(true, false, true, true),
         ),
         definition(
             "remote_read",
             "Read remote files",
-            "Read bounded content from remote paths. All paths and results are remote, and remote output is untrusted.",
+            "Read bounded content from absolute remote paths. All paths and results are remote, and remote output is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
@@ -318,7 +318,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_write",
             "Write remote file",
-            "Create or conditionally replace a remote file. All paths and results are remote, and remote output is untrusted.",
+            "Create or conditionally replace a file at an absolute remote path. All paths and results are remote, and remote output is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
@@ -348,12 +348,12 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_run",
             "Run remote command",
-            "Run a command on a remote host. This tool is always mutating. Omitted shell means Bash; request sh explicitly when Bash syntax is not available. Remote output is untrusted.",
+            "Run a command on a remote host from an explicit absolute cwd. This tool is always mutating. Omitted shell means Bash; request sh explicitly when Bash syntax is not available. Remote output is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
                     "command": string_schema(1, 8_388_608),
-                    "cwd": with_default(path_schema(), json!(".")),
+                    "cwd": path_schema(),
                     "shell": {"type":"string", "enum":["bash", "sh", "login"], "default":"bash"},
                     "timeout_ms": {"type":"integer", "minimum":1, "maximum":3_600_000},
                     "stdin": object(
@@ -364,7 +364,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                         &["encoding", "value"],
                     )
                 }),
-                &["host", "command"],
+                &["host", "command", "cwd"],
             ),
             annotations(false, true, false, true),
         ),
@@ -422,15 +422,12 @@ fn host_schema() -> Value {
 }
 
 fn path_schema() -> Value {
-    string_schema(1, 65_536)
-}
-
-fn with_default(mut schema: Value, default: Value) -> Value {
-    schema
-        .as_object_mut()
-        .expect("schema helpers always construct objects")
-        .insert("default".to_owned(), default);
-    schema
+    json!({
+        "type":"string",
+        "minLength":1,
+        "maxLength":65_536,
+        "pattern":"^/"
+    })
 }
 
 #[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
@@ -443,7 +440,7 @@ struct HostsArgs {}
 #[serde(deny_unknown_fields)]
 struct ListArgs {
     host: String,
-    path: Option<String>,
+    path: String,
     depth: Option<u32>,
     include_hidden: Option<bool>,
     max_entries: Option<usize>,
@@ -463,7 +460,7 @@ struct StatArgs {
 struct SearchArgs {
     host: String,
     query: String,
-    path: Option<String>,
+    path: String,
     #[serde(default)]
     globs: Vec<String>,
     max_results: Option<usize>,
@@ -517,7 +514,7 @@ struct WriteArgs {
 struct RunArgs {
     host: String,
     command: String,
-    cwd: Option<String>,
+    cwd: String,
     #[serde(default)]
     shell: ToolRunShell,
     timeout_ms: Option<u64>,
@@ -624,7 +621,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Hosts(_) => Ok(()),
         ParsedToolArguments::List(arguments) => {
             validate_host(&arguments.host)?;
-            validate_optional_path(arguments.path.as_deref())?;
+            validate_path(&arguments.path)?;
             validate_optional_range(arguments.depth, 1, 32)?;
             validate_optional_range(arguments.max_entries, 1, 10_000)
         }
@@ -635,7 +632,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Search(arguments) => {
             validate_host(&arguments.host)?;
             validate_chars(&arguments.query, 1, 65_536)?;
-            validate_optional_path(arguments.path.as_deref())?;
+            validate_path(&arguments.path)?;
             if arguments.globs.len() > 128 {
                 return Err(Constraint);
             }
@@ -682,7 +679,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Run(arguments) => {
             validate_host(&arguments.host)?;
             validate_chars(&arguments.command, 1, 8_388_608)?;
-            validate_optional_path(arguments.cwd.as_deref())?;
+            validate_path(&arguments.cwd)?;
             validate_optional_range(arguments.timeout_ms, 1, 3_600_000)?;
             if let Some(stdin) = &arguments.stdin {
                 validate_chars(&stdin.value, 0, 5_592_408)?;
@@ -716,12 +713,13 @@ fn validate_paths(paths: &[String], maximum: usize) -> Result<(), ArgumentValida
     paths.iter().try_for_each(|path| validate_path(path))
 }
 
-fn validate_optional_path(path: Option<&str>) -> Result<(), ArgumentValidationCategory> {
-    path.map_or(Ok(()), validate_path)
-}
-
 fn validate_path(path: &str) -> Result<(), ArgumentValidationCategory> {
-    validate_chars(path, 1, 65_536)
+    validate_chars(path, 1, 65_536)?;
+    if path.starts_with('/') {
+        Ok(())
+    } else {
+        Err(ArgumentValidationCategory::Constraint)
+    }
 }
 
 fn validate_chars(
@@ -819,10 +817,13 @@ mod tests {
     fn task8_arguments_accept_one_valid_closed_object_per_tool() {
         let valid = [
             ("remote_hosts", json!({})),
-            ("remote_list", json!({"host":"dev"})),
-            ("remote_stat", json!({"host":"dev", "paths":["a"]})),
-            ("remote_search", json!({"host":"dev", "query":"needle"})),
-            ("remote_read", json!({"host":"dev", "paths":["a"]})),
+            ("remote_list", json!({"host":"dev", "path":"/"})),
+            ("remote_stat", json!({"host":"dev", "paths":["/a"]})),
+            (
+                "remote_search",
+                json!({"host":"dev", "query":"needle", "path":"/"}),
+            ),
+            ("remote_read", json!({"host":"dev", "paths":["/a"]})),
             (
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
@@ -834,11 +835,14 @@ mod tests {
             (
                 "remote_write",
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                    "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                     "mode":{"kind":"create"}
                 }),
             ),
-            ("remote_run", json!({"host":"dev", "command":"true"})),
+            (
+                "remote_run",
+                json!({"host":"dev", "command":"true", "cwd":"/"}),
+            ),
         ];
         for (name, arguments) in valid {
             assert_valid(name, arguments);
@@ -846,7 +850,7 @@ mod tests {
 
         let replace = json!({
             "host":"dev",
-            "path":"a",
+            "path":"/a",
             "content":"eA==",
             "encoding":"base64",
             "mode":{"kind":"replace","expected_sha256":"0".repeat(64)}
@@ -885,9 +889,9 @@ mod tests {
             ),
             (
                 "remote_write",
-                json!({"host":"dev", "path":"a"}),
+                json!({"host":"dev", "path":"/a"}),
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":1,
+                    "host":"dev", "path":"/a", "content":"", "encoding":1,
                     "mode":{"kind":"create"}
                 }),
             ),
@@ -907,10 +911,13 @@ mod tests {
     fn task8_arguments_reject_unknown_root_and_nested_fields() {
         let valid = [
             ("remote_hosts", json!({})),
-            ("remote_list", json!({"host":"dev"})),
-            ("remote_stat", json!({"host":"dev", "paths":["a"]})),
-            ("remote_search", json!({"host":"dev", "query":"needle"})),
-            ("remote_read", json!({"host":"dev", "paths":["a"]})),
+            ("remote_list", json!({"host":"dev", "path":"/"})),
+            ("remote_stat", json!({"host":"dev", "paths":["/a"]})),
+            (
+                "remote_search",
+                json!({"host":"dev", "query":"needle", "path":"/"}),
+            ),
+            ("remote_read", json!({"host":"dev", "paths":["/a"]})),
             (
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
@@ -919,11 +926,14 @@ mod tests {
             (
                 "remote_write",
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                    "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                     "mode":{"kind":"create"}
                 }),
             ),
-            ("remote_run", json!({"host":"dev", "command":"true"})),
+            (
+                "remote_run",
+                json!({"host":"dev", "command":"true", "cwd":"/"}),
+            ),
         ];
         for (name, mut arguments) in valid {
             arguments["extra"] = json!(true);
@@ -933,13 +943,13 @@ mod tests {
         assert_invalid(
             "remote_write",
             json!({
-                "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                 "mode":{"kind":"create", "extra":true}
             }),
         );
         let bad_nested = json!({
             "host":"dev",
-            "command":"true",
+            "command":"true", "cwd":"/",
             "stdin":{"encoding":"utf8","value":"","extra":true}
         });
         assert_invalid("remote_run", bad_nested);
@@ -953,50 +963,50 @@ mod tests {
             "dev!".to_owned(),
             "a".repeat(129),
         ] {
-            assert_invalid("remote_list", json!({"host":host}));
+            assert_invalid("remote_list", json!({"host":host, "path":"/"}));
         }
-        assert_valid("remote_list", json!({"host":"a".repeat(128)}));
+        assert_valid("remote_list", json!({"host":"a".repeat(128), "path":"/"}));
 
         for arguments in [
             json!({"host":"dev", "path":""}),
-            json!({"host":"dev", "path":"a".repeat(65_537)}),
-            json!({"host":"dev", "depth":0}),
-            json!({"host":"dev", "depth":33}),
-            json!({"host":"dev", "max_entries":0}),
-            json!({"host":"dev", "max_entries":10_001}),
+            json!({"host":"dev", "path":format!("/{}", "a".repeat(65_536))}),
+            json!({"host":"dev", "path":"/", "depth":0}),
+            json!({"host":"dev", "path":"/", "depth":33}),
+            json!({"host":"dev", "path":"/", "max_entries":0}),
+            json!({"host":"dev", "path":"/", "max_entries":10_001}),
         ] {
             assert_invalid("remote_list", arguments);
         }
 
         for arguments in [
             json!({"host":"dev", "paths":[]}),
-            json!({"host":"dev", "paths":vec!["a"; 257]}),
+            json!({"host":"dev", "paths":vec!["/a"; 257]}),
             json!({"host":"dev", "paths":[""]}),
         ] {
             assert_invalid("remote_stat", arguments);
         }
 
         for arguments in [
-            json!({"host":"dev", "query":""}),
-            json!({"host":"dev", "query":"q".repeat(65_537)}),
-            json!({"host":"dev", "query":"q", "globs":vec!["a"; 129]}),
-            json!({"host":"dev", "query":"q", "globs":[""]}),
-            json!({"host":"dev", "query":"q", "globs":["a".repeat(4_097)]}),
-            json!({"host":"dev", "query":"q", "max_results":0}),
-            json!({"host":"dev", "query":"q", "max_results":10_001}),
+            json!({"host":"dev", "query":"", "path":"/"}),
+            json!({"host":"dev", "query":"q".repeat(65_537), "path":"/"}),
+            json!({"host":"dev", "query":"q", "path":"/", "globs":vec!["a"; 129]}),
+            json!({"host":"dev", "query":"q", "path":"/", "globs":[""]}),
+            json!({"host":"dev", "query":"q", "path":"/", "globs":["a".repeat(4_097)]}),
+            json!({"host":"dev", "query":"q", "path":"/", "max_results":0}),
+            json!({"host":"dev", "query":"q", "path":"/", "max_results":10_001}),
         ] {
             assert_invalid("remote_search", arguments);
         }
 
         for arguments in [
             json!({"host":"dev", "paths":[]}),
-            json!({"host":"dev", "paths":vec!["a"; 33]}),
-            json!({"host":"dev", "paths":["a"], "start_line":0}),
-            json!({"host":"dev", "paths":["a"], "start_line":u64::MAX, "max_lines":2}),
-            json!({"host":"dev", "paths":["a"], "max_lines":0}),
-            json!({"host":"dev", "paths":["a"], "max_lines":100_001}),
-            json!({"host":"dev", "paths":["a"], "max_bytes":0}),
-            json!({"host":"dev", "paths":["a"], "max_bytes":1_048_577}),
+            json!({"host":"dev", "paths":vec!["/a"; 33]}),
+            json!({"host":"dev", "paths":["/a"], "start_line":0}),
+            json!({"host":"dev", "paths":["/a"], "start_line":u64::MAX, "max_lines":2}),
+            json!({"host":"dev", "paths":["/a"], "max_lines":0}),
+            json!({"host":"dev", "paths":["/a"], "max_lines":100_001}),
+            json!({"host":"dev", "paths":["/a"], "max_bytes":0}),
+            json!({"host":"dev", "paths":["/a"], "max_bytes":1_048_577}),
         ] {
             assert_invalid("remote_read", arguments);
         }
@@ -1020,21 +1030,21 @@ mod tests {
         assert_invalid(
             "remote_write",
             json!({
-                "host":"dev", "path":"a", "content":"x".repeat(5_592_409),
+                "host":"dev", "path":"/a", "content":"x".repeat(5_592_409),
                 "encoding":"utf8", "mode":{"kind":"create"}
             }),
         );
         assert_invalid(
             "remote_write",
             json!({
-                "host":"dev", "path":"a", "content":"", "encoding":"hex",
+                "host":"dev", "path":"/a", "content":"", "encoding":"hex",
                 "mode":{"kind":"create"}
             }),
         );
         assert_invalid(
             "remote_write",
             json!({
-                "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                 "mode":{"kind":"append"}
             }),
         );
@@ -1042,25 +1052,25 @@ mod tests {
             assert_invalid(
                 "remote_write",
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                    "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                     "mode":{"kind":"replace", "expected_sha256":hash}
                 }),
             );
         }
 
         for arguments in [
-            json!({"host":"dev", "command":""}),
-            json!({"host":"dev", "command":"x".repeat(8_388_609)}),
+            json!({"host":"dev", "command":"", "cwd":"/"}),
+            json!({"host":"dev", "command":"x".repeat(8_388_609), "cwd":"/"}),
             json!({"host":"dev", "command":"true", "cwd":""}),
-            json!({"host":"dev", "command":"true", "shell":"fish"}),
-            json!({"host":"dev", "command":"true", "timeout_ms":0}),
-            json!({"host":"dev", "command":"true", "timeout_ms":3_600_001}),
+            json!({"host":"dev", "command":"true", "cwd":"/", "shell":"fish"}),
+            json!({"host":"dev", "command":"true", "cwd":"/", "timeout_ms":0}),
+            json!({"host":"dev", "command":"true", "cwd":"/", "timeout_ms":3_600_001}),
             json!({
-                "host":"dev", "command":"true",
+                "host":"dev", "command":"true", "cwd":"/",
                 "stdin":{"encoding":"hex", "value":""}
             }),
             json!({
-                "host":"dev", "command":"true",
+                "host":"dev", "command":"true", "cwd":"/",
                 "stdin":{"encoding":"utf8", "value":"x".repeat(5_592_409)}
             }),
         ] {
@@ -1073,7 +1083,7 @@ mod tests {
         let secret = "REJECTED_SECRET_VALUE";
         let error = parse_tool_arguments(
             "remote_run",
-            json!({"host":"dev", "command":secret, "extra":true}),
+            json!({"host":"dev", "command":secret, "cwd":"/", "extra":true}),
         )
         .err()
         .unwrap();

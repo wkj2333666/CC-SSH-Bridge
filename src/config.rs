@@ -280,7 +280,7 @@ impl Config {
             let normalized_root = RemotePath::resolve(&profile.root, ".").map_err(|_| {
                 BridgeError::invalid_config(format!("host {alias} has an invalid root"))
             })?;
-            if normalized_root.absolute().len() > MAX_REMOTE_CONTEXT_ROOT_BYTES {
+            if normalized_root.as_str().len() > MAX_REMOTE_CONTEXT_ROOT_BYTES {
                 return Err(BridgeError::invalid_config(format!(
                     "host {alias} root exceeds {MAX_REMOTE_CONTEXT_ROOT_BYTES} UTF-8 bytes"
                 )));

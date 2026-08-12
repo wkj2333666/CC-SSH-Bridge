@@ -172,18 +172,18 @@ fn fixed_command_quotes_only_its_arguments() {
 #[test]
 fn remote_paths_normalize_without_escaping_the_root() {
     let path = RemotePath::resolve("/srv/./bridge/root", "projects/demo/../src//main.rs").unwrap();
-    assert_eq!(path.absolute(), "/srv/bridge/root/projects/src/main.rs");
+    assert_eq!(path.as_str(), "/srv/bridge/root/projects/src/main.rs");
     assert_eq!(path.relative(), "projects/src/main.rs");
 
     let root = RemotePath::resolve("/srv/bridge/root/", ".").unwrap();
-    assert_eq!(root.absolute(), "/srv/bridge/root");
+    assert_eq!(root.as_str(), "/srv/bridge/root");
     assert_eq!(root.relative(), "");
 }
 
 #[test]
 fn remote_paths_accept_only_absolute_paths_within_the_root_boundary() {
     let inside = RemotePath::resolve("/srv/bridge/root", "/srv/bridge/root/a/../b").unwrap();
-    assert_eq!(inside.absolute(), "/srv/bridge/root/b");
+    assert_eq!(inside.as_str(), "/srv/bridge/root/b");
     assert_eq!(inside.relative(), "b");
 
     for requested in [
@@ -207,6 +207,27 @@ fn remote_paths_reject_nul_and_non_absolute_roots() {
         let error = RemotePath::resolve(root, requested).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
+}
+
+#[test]
+fn remote_absolute_paths_require_and_normalize_absolute_input() {
+    assert_eq!(
+        RemotePath::absolute("/a/./b/../c").unwrap().as_str(),
+        "/a/c"
+    );
+    assert_eq!(RemotePath::absolute("/../../").unwrap().as_str(), "/");
+    for invalid in ["", ".", "relative/path", "../escape"] {
+        let error = RemotePath::absolute(invalid).unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::RemoteAbsolutePathRequired,
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        RemotePath::absolute("/ok\0bad").unwrap_err().code,
+        ErrorCode::InvalidArgument
+    );
 }
 
 #[test]

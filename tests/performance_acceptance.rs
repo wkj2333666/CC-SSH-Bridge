@@ -174,7 +174,7 @@ async fn task11_release_latency_concurrency_cancellation_and_wire_acceptance() {
             ("FAKE_SSH_STDERR", OsString::new()),
         ],
     );
-    let run_arguments = json!({"host":"dev","command":":","shell":"sh"});
+    let run_arguments = json!({"host":"dev","command":":","cwd":"/srv/project","shell":"sh"});
     for _ in 0..SSH_WARM_CALLS {
         let result = call_json(&complete.tools, "remote_run", run_arguments.clone()).await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -232,7 +232,7 @@ async fn five_hosts_finish_in_parallel() {
             call_json(
                 &tools,
                 "remote_run",
-                json!({"host":host,"command":":","shell":"sh"}),
+                json!({"host":host,"command":":","cwd":"/srv/project","shell":"sh"}),
             )
             .await
         });
@@ -279,7 +279,7 @@ async fn cancellation_kills_the_entire_process_group() {
         tools
             .call(
                 "remote_run".to_owned(),
-                json!({"host":"dev","command":":","shell":"sh"}),
+                json!({"host":"dev","command":":","cwd":"/srv/project","shell":"sh"}),
                 ToolCallContext {
                     cancel: call_cancel,
                     wire_budget: roomy_context().wire_budget,
@@ -413,7 +413,7 @@ async fn output_rss_child() {
         call_json(
             &tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","command":":","cwd":"/srv/project","shell":"sh"}),
         )
         .await
     });

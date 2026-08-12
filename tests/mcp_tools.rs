@@ -26,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 mod support;
 
+fn absolute(root: &std::path::Path, relative: &str) -> String {
+    root.join(relative).to_string_lossy().into_owned()
+}
+
 fn remote_tools_fixture() -> (tempfile::TempDir, Arc<RemoteBridge>, RemoteMcpTools) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
@@ -116,6 +120,7 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
             json!({
                 "host":"dev",
                 "command":format!("printf stdout-{exit_status}; printf stderr-{exit_status} >&2; exit {exit_status}"),
+                "cwd":remote.path(),
                 "shell":"sh"
             }),
         )
@@ -150,6 +155,7 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
         json!({
             "host":"dev",
             "command":"printf applied > review-side-effect; dd if=/dev/zero bs=1024 count=300 >&2 2>/dev/null; exit 2",
+            "cwd":remote.path(),
             "shell":"sh"
         }),
     )
@@ -482,7 +488,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let listed = session
         .call(
             "remote_list",
-            json!({"host":"dev","path":".","max_entries":32}),
+            json!({"host":"dev","path":remote.path(),"max_entries":32}),
         )
         .await;
     assert_remote_context(&listed, remote.path());
@@ -495,7 +501,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let stated = session
         .call(
             "remote_stat",
-            json!({"host":"dev","paths":["binary.bin","missing.txt"]}),
+            json!({"host":"dev","paths":[absolute(remote.path(), "binary.bin"), absolute(remote.path(), "missing.txt")]}),
         )
         .await;
     assert_remote_context(&stated, remote.path());
@@ -506,7 +512,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let searched = session
         .call(
             "remote_search",
-            json!({"host":"dev","query":"$(touch SHOULD_NOT_EXIST)","path":"."}),
+            json!({"host":"dev","query":"$(touch SHOULD_NOT_EXIST)","path":remote.path()}),
         )
         .await;
     assert_remote_context(&searched, remote.path());
@@ -519,7 +525,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let read = session
         .call(
             "remote_read",
-            json!({"host":"dev","paths":["utf8.txt","binary.bin"],"max_bytes":4096}),
+            json!({"host":"dev","paths":[absolute(remote.path(), "utf8.txt"), absolute(remote.path(), "binary.bin")],"max_bytes":4096}),
         )
         .await;
     assert_remote_context(&read, remote.path());
@@ -530,7 +536,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf RUN_SURFACE; dd if=/dev/zero bs=1024 count=300 2>/dev/null","shell":"sh"}),
+            json!({"host":"dev","command":"printf RUN_SURFACE; dd if=/dev/zero bs=1024 count=300 2>/dev/null","cwd":remote.path(),"shell":"sh"}),
         )
         .await;
     assert_remote_context(&run, remote.path());
@@ -553,7 +559,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         .call(
             "remote_write",
             json!({
-                "host":"dev","path":"created.txt","content":"WRITE_SURFACE\n",
+                "host":"dev","path":absolute(remote.path(), "created.txt"),"content":"WRITE_SURFACE\n",
                 "encoding":"utf8","mode":{"kind":"create"}
             }),
         )
@@ -566,7 +572,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             "remote_apply_patch",
             json!({
                 "host":"dev",
-                "patch":"--- a/created.txt\n+++ b/created.txt\n@@ -1 +1 @@\n-WRITE_SURFACE\n+PATCH_SURFACE\n"
+                "patch":format!("--- {path}\n+++ {path}\n@@ -1 +1 @@\n-WRITE_SURFACE\n+PATCH_SURFACE\n", path=absolute(remote.path(), "created.txt"))
             }),
         )
         .await;
@@ -592,7 +598,10 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
     let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &extra);
     let mut session = ProtocolSession::start(tools).await;
     let default_bash = session
-        .call("remote_run", json!({"host":"dev","command":"printf safe"}))
+        .call(
+            "remote_run",
+            json!({"host":"dev","command":"printf safe","cwd":remote.path()}),
+        )
         .await;
     assert_eq!(default_bash["isError"], Value::Null, "{default_bash}");
     assert_eq!(default_bash["structuredContent"]["shell"]["kind"], "bash");
@@ -611,7 +620,7 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
     let explicit_sh = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf safe","shell":"sh"}),
+            json!({"host":"dev","command":"printf safe","cwd":remote.path(),"shell":"sh"}),
         )
         .await;
     assert_eq!(explicit_sh["isError"], Value::Null, "{explicit_sh}");
@@ -642,7 +651,7 @@ async fn task8_shell_surface_missing_bash_rejects_before_command_child() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf must-not-run","shell":"bash"}),
+            json!({"host":"dev","command":"printf must-not-run","cwd":remote.path(),"shell":"bash"}),
         )
         .await;
     assert_eq!(run["isError"], true);
@@ -666,7 +675,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf safe","shell":"login"}),
+            json!({"host":"dev","command":"printf safe","cwd":remote.path(),"shell":"login"}),
         )
         .await;
     assert_eq!(
@@ -687,7 +696,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     let timed_out = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf never","shell":"login","timeout_ms":50}),
+            json!({"host":"dev","command":"printf never","cwd":remote.path(),"shell":"login","timeout_ms":50}),
         )
         .await;
     assert_eq!(timed_out["isError"], true);
@@ -728,14 +737,20 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
     for (name, arguments) in [
         (
             "remote_list",
-            json!({"host":"dev","path":".","max_entries":1}),
+            json!({"host":"dev","path":remote.path(),"max_entries":1}),
         ),
-        ("remote_stat", json!({"host":"dev","paths":["read.txt"]})),
+        (
+            "remote_stat",
+            json!({"host":"dev","paths":[absolute(remote.path(), "read.txt")]}),
+        ),
         (
             "remote_search",
-            json!({"host":"dev","query":"READ_ONLY_SENTINEL","path":"."}),
+            json!({"host":"dev","query":"READ_ONLY_SENTINEL","path":remote.path()}),
         ),
-        ("remote_read", json!({"host":"dev","paths":["read.txt"]})),
+        (
+            "remote_read",
+            json!({"host":"dev","paths":[absolute(remote.path(), "read.txt")]}),
+        ),
     ] {
         let result = session.call(name, arguments).await;
         assert_ne!(result["isError"], true, "{name}: {result}");
@@ -755,7 +770,7 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
     for (name, arguments) in [
         (
             "remote_write",
-            json!({"host":"dev","path":"new.txt","content":"x","encoding":"utf8","mode":{"kind":"create"}}),
+            json!({"host":"dev","path":absolute(remote.path(), "new.txt"),"content":"x","encoding":"utf8","mode":{"kind":"create"}}),
         ),
         (
             "remote_apply_patch",
@@ -763,7 +778,7 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
         ),
         (
             "remote_run",
-            json!({"host":"dev","command":"printf must-not-run","shell":"sh"}),
+            json!({"host":"dev","command":"printf must-not-run","cwd":remote.path(),"shell":"sh"}),
         ),
     ] {
         let result = session.call(name, arguments).await;
@@ -1026,9 +1041,9 @@ fn assert_integer_range(schema: &Value, minimum: u64, maximum: u64) {
 fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
     let expected_required = [
         ("remote_hosts", json!([])),
-        ("remote_list", json!(["host"])),
+        ("remote_list", json!(["host", "path"])),
         ("remote_stat", json!(["host", "paths"])),
-        ("remote_search", json!(["host", "query"])),
+        ("remote_search", json!(["host", "query", "path"])),
         ("remote_read", json!(["host", "paths"])),
         ("remote_output_read", json!(["output_ref", "stream"])),
         ("remote_apply_patch", json!(["host", "patch"])),
@@ -1036,7 +1051,7 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
             "remote_write",
             json!(["host", "path", "content", "encoding", "mode"]),
         ),
-        ("remote_run", json!(["host", "command"])),
+        ("remote_run", json!(["host", "command", "cwd"])),
     ];
     for (name, required) in expected_required {
         assert_eq!(tool(name).input_schema["required"], required, "{name}");
@@ -1061,9 +1076,11 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
         ("remote_run", "cwd"),
     ] {
         assert_string_bounds(property(tool(name), field), 65_536);
+        assert_eq!(property(tool(name), field)["pattern"], "^/");
     }
     for name in ["remote_stat", "remote_read"] {
         assert_string_bounds(&property(tool(name), "paths")["items"], 65_536);
+        assert_eq!(property(tool(name), "paths")["items"]["pattern"], "^/");
     }
 
     assert_integer_range(property(tool("remote_list"), "depth"), 1, 32);
@@ -1120,7 +1137,6 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
 
 #[test]
 fn task8_schema_defaults_and_closed_write_mode_are_exact() {
-    assert_eq!(property(tool("remote_list"), "path")["default"], ".");
     assert_eq!(property(tool("remote_list"), "depth")["default"], 1);
     assert_eq!(
         property(tool("remote_list"), "include_hidden")["default"],
@@ -1130,7 +1146,6 @@ fn task8_schema_defaults_and_closed_write_mode_are_exact() {
         property(tool("remote_list"), "max_entries")["default"],
         1_000
     );
-    assert_eq!(property(tool("remote_search"), "path")["default"], ".");
     assert_eq!(
         property(tool("remote_search"), "globs")["default"],
         json!([])
@@ -1147,7 +1162,6 @@ fn task8_schema_defaults_and_closed_write_mode_are_exact() {
         property(tool("remote_output_read"), "max_bytes")["default"],
         262_144
     );
-    assert_eq!(property(tool("remote_run"), "cwd")["default"], ".");
     assert_eq!(property(tool("remote_run"), "shell")["default"], "bash");
 
     let alternatives = property(tool("remote_write"), "mode")["oneOf"]
@@ -1277,7 +1291,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let listed = call_json(
         &tools,
         "remote_list",
-        json!({"host":"dev", "path":".", "max_entries":32}),
+        json!({"host":"dev", "path":remote.path(), "max_entries":32}),
     )
     .await;
     assert!(text_json(&listed).to_string().contains("utf8.txt"));
@@ -1287,7 +1301,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let stated = call_json(
         &tools,
         "remote_stat",
-        json!({"host":"dev", "paths":["utf8.txt", "binary.bin"]}),
+        json!({"host":"dev", "paths":[absolute(remote.path(), "utf8.txt"), absolute(remote.path(), "binary.bin")]}),
     )
     .await;
     assert_eq!(text_json(&stated)["entries"].as_array().unwrap().len(), 2);
@@ -1300,7 +1314,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let read = call_json(
         &tools,
         "remote_read",
-        json!({"host":"dev", "paths":["utf8.txt", "binary.bin"], "max_bytes":4096}),
+        json!({"host":"dev", "paths":[absolute(remote.path(), "utf8.txt"), absolute(remote.path(), "binary.bin")], "max_bytes":4096}),
     )
     .await;
     let read_text = text_json(&read).to_string();
@@ -1315,7 +1329,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let searched = call_json(
         &tools,
         "remote_search",
-        json!({"host":"dev", "query":"UTF8_SENTINEL", "path":"."}),
+        json!({"host":"dev", "query":"UTF8_SENTINEL", "path":remote.path()}),
     )
     .await;
     assert!(text_json(&searched).to_string().contains("UTF8_SENTINEL"));
@@ -1323,7 +1337,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let run = call_json(
         &tools,
         "remote_run",
-        json!({"host":"dev", "command":"printf RUN_SENTINEL", "shell":"sh"}),
+        json!({"host":"dev", "command":"printf RUN_SENTINEL", "cwd":remote.path(), "shell":"sh"}),
     )
     .await;
     let run_text = text_json(&run).to_string();
@@ -1336,7 +1350,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         "remote_write",
         json!({
             "host":"dev",
-            "path":"created.txt",
+            "path":absolute(remote.path(), "created.txt"),
             "content":"WRITE_SENTINEL\n",
             "encoding":"utf8",
             "mode":{"kind":"create"}
@@ -1644,19 +1658,20 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
     call_json(
         &tools,
         "remote_list",
-        json!({"host":"dev","path":".","max_entries":1}),
+        json!({"host":"dev","path":remote.path(),"max_entries":1}),
     )
     .await;
     let mut list_shape = None;
-    for value in task8_hostile_values(true) {
+    for hostile in task8_hostile_values(true) {
+        let value = absolute(remote.path(), hostile);
         std::fs::write(&log, b"").unwrap();
         let result = call_json(
             &tools,
             "remote_list",
-            json!({"host":"dev","path":value,"max_entries":1}),
+            json!({"host":"dev","path":&value,"max_entries":1}),
         )
         .await;
-        if value.contains('\0') {
+        if hostile.contains('\0') {
             assert_eq!(result["isError"], true, "value={value:?}: {result}");
             assert!(
                 transport_call_kinds(&log).is_empty(),
@@ -1677,19 +1692,20 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
     call_json(
         &tools,
         "remote_run",
-        json!({"host":"dev","command":"printf safe","cwd":".","shell":"sh"}),
+        json!({"host":"dev","command":"printf safe","cwd":remote.path(),"shell":"sh"}),
     )
     .await;
     let mut run_shape = None;
-    for value in task8_hostile_values(true) {
+    for hostile in task8_hostile_values(true) {
+        let value = absolute(remote.path(), hostile);
         std::fs::write(&log, b"").unwrap();
         let result = call_json(
             &tools,
             "remote_run",
-            json!({"host":"dev","command":"printf safe","cwd":value,"shell":"sh"}),
+            json!({"host":"dev","command":"printf safe","cwd":&value,"shell":"sh"}),
         )
         .await;
-        if value.contains('\0') {
+        if hostile.contains('\0') {
             assert_eq!(result["isError"], true, "value={value:?}: {result}");
             assert!(
                 transport_call_kinds(&log).is_empty(),
@@ -1716,7 +1732,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
     call_json(
         &tools,
         "remote_search",
-        json!({"host":"dev","query":"needle","path":"."}),
+        json!({"host":"dev","query":"needle","path":remote.path()}),
     )
     .await;
 
@@ -1726,7 +1742,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
         let result = call_json(
             &tools,
             "remote_search",
-            json!({"host":"dev","query":value,"path":"."}),
+            json!({"host":"dev","query":value,"path":remote.path()}),
         )
         .await;
         if value.contains(['\0', '\n']) {
@@ -1753,7 +1769,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
         let result = call_json(
             &tools,
             "remote_search",
-            json!({"host":"dev","query":"needle","path":".","globs":[value]}),
+            json!({"host":"dev","query":"needle","path":remote.path(),"globs":[value]}),
         )
         .await;
         if value.contains('\0') {
@@ -1784,7 +1800,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         &tools,
         "remote_write",
         json!({
-            "host":"dev","path":"warm","content":"warm","encoding":"utf8",
+            "host":"dev","path":absolute(remote.path(), "warm"),"content":"warm","encoding":"utf8",
             "mode":{"kind":"create"}
         }),
     )
@@ -1793,11 +1809,12 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
     for (index, value) in task8_hostile_values(true).into_iter().enumerate() {
         std::fs::write(&log, b"").unwrap();
         let path = format!("content-{index}");
+        let absolute_path = absolute(remote.path(), &path);
         let result = call_json(
             &tools,
             "remote_write",
             json!({
-                "host":"dev","path":path,"content":value,"encoding":"utf8",
+                "host":"dev","path":absolute_path,"content":value,"encoding":"utf8",
                 "mode":{"kind":"create"}
             }),
         )
@@ -1829,7 +1846,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             .call(
                 "remote_run",
                 json!({
-                    "host":"dev","command":"cat","shell":"sh",
+                    "host":"dev","command":"cat","cwd":remote.path(),"shell":"sh",
                     "stdin":{"encoding":"utf8","value":value}
                 }),
             )
@@ -1930,11 +1947,11 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
         .collect::<Vec<_>>();
     let (_runtime, log, _bridge, tools) = five_host_tools_fixture(&root_paths);
 
-    for (host, _) in &root_paths {
+    for (host, root) in &root_paths {
         let warm = call_json(
             &tools,
             "remote_run",
-            json!({"host":host,"command":":","shell":"sh"}),
+            json!({"host":host,"command":":","cwd":root,"shell":"sh"}),
         )
         .await;
         assert_eq!(warm["isError"], Value::Null, "warm host={host}: {warm}");
@@ -1944,7 +1961,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
     let mut session =
         ProtocolSession::start_with_limits(tools, cc_ssh_bridge::MAX_FRAME_BYTES, 8).await;
     let started = Instant::now();
-    for (index, (host, _)) in root_paths.iter().enumerate() {
+    for (index, (host, root)) in root_paths.iter().enumerate() {
         let id = 100 + index as u64;
         session
             .send(json!({
@@ -1952,6 +1969,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
                 "params":{"name":"remote_run","arguments":{
                     "host":host,
                     "command":format!("sleep 1; printf HOST-{index}"),
+                    "cwd":root,
                     "shell":"sh"
                 }}
             }))
@@ -2106,7 +2124,7 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
         .send(json!({
             "jsonrpc":"2.0","id":cancelled_id,"method":"tools/call",
             "params":{"name":"remote_run","arguments":{
-                "host":"dev","command":"printf NEVER","shell":"sh"
+                "host":"dev","command":"printf NEVER","cwd":remote.path(),"shell":"sh"
             }}
         }))
         .await;
@@ -2215,7 +2233,7 @@ async fn task8_hostile_cancellation_reason_matrix_is_local_data_only() {
             .send(json!({
                 "jsonrpc":"2.0","id":request_id,"method":"tools/call",
                 "params":{"name":"remote_run","arguments":{
-                    "host":"dev","command":"printf NEVER","shell":"sh"
+                    "host":"dev","command":"printf NEVER","cwd":remote.path(),"shell":"sh"
                 }}
             }))
             .await;
@@ -2300,7 +2318,7 @@ async fn task78_release_fake_call_p95_is_below_ten_milliseconds() {
             ("FAKE_SSH_STDERR", OsString::from("")),
         ],
     );
-    let arguments = json!({"host":"dev","command":":","shell":"sh"});
+    let arguments = json!({"host":"dev","command":":","cwd":remote.path(),"shell":"sh"});
     for _ in 0..WARM_CALLS {
         let result = call_json(&tools, "remote_run", arguments.clone()).await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -2360,7 +2378,11 @@ fn retention_models_fixture(
     let search_line = format!("needle {}\n", "s".repeat(2_992));
     std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
     let stat_paths = (0..256)
-        .map(|index| format!("missing-{index:03}-{}", "p".repeat(2_000)))
+        .map(|index| {
+            root.join(format!("missing-{index:03}-{}", "p".repeat(2_000)))
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
 
     let runtime_base = tempfile::TempDir::new().unwrap();
@@ -2399,10 +2421,10 @@ fn retention_models_fixture(
     (
         runtime_base,
         RemoteMcpTools::new(bridge),
-        json!({"host":"dev","path":".","max_entries":1_000}),
+        json!({"host":"dev","path":&root,"max_entries":1_000}),
         json!({"host":"dev","paths":stat_paths}),
         json!({
-            "host":"dev","query":"needle","path":".","max_results":500
+            "host":"dev","query":"needle","path":&root,"max_results":500
         }),
     )
 }
@@ -2518,7 +2540,7 @@ async fn task8_output_rss_child() {
         let output = call_json(
             &output_tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","command":":","cwd":output_root.path(),"shell":"sh"}),
         )
         .await;
         assert_eq!(output["isError"], Value::Null, "{output}");

@@ -428,6 +428,7 @@ struct ResolvedSearch {
     host: String,
     query: String,
     path: RemotePath,
+    absolute_path: bool,
     globs: Vec<String>,
     max_results: usize,
     binary: bool,
@@ -437,7 +438,7 @@ fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedL
     let host = config.host(&request.host)?;
     let requested = request.path.as_deref().unwrap_or(".");
     validate_path(requested)?;
-    let path = RemotePath::resolve(&host.profile.root, requested)?;
+    let path = resolve_path(host.profile.root.as_str(), requested)?;
     let depth = request.depth.unwrap_or(DEFAULT_LIST_DEPTH);
     if !(1..=MAX_LIST_DEPTH).contains(&depth) {
         return Err(BridgeError::invalid_argument(
@@ -450,7 +451,7 @@ fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedL
             "list max_entries must be between 1 and 10000",
         ));
     }
-    validate_frame(host.limits, [path.absolute().len()])?;
+    validate_frame(host.limits, [path.as_str().len()])?;
     Ok(ResolvedList {
         host: request.host,
         path,
@@ -470,7 +471,7 @@ fn resolve_stat(config: &Config, request: StatRequest) -> BridgeResult<ResolvedS
     let paths = resolve_paths(&host.profile.root, &request.paths)?;
     validate_frame(
         host.limits,
-        paths.iter().map(|path| path.absolute().len() + 1),
+        paths.iter().map(|path| path.as_str().len() + 1),
     )?;
     Ok(ResolvedStat {
         host: request.host,
@@ -509,7 +510,7 @@ fn resolve_read(config: &Config, request: ReadRequest) -> BridgeResult<ResolvedR
     }
     validate_frame(
         host.limits,
-        paths.iter().map(|path| path.absolute().len() + 1),
+        paths.iter().map(|path| path.as_str().len() + 1),
     )?;
     Ok(ResolvedRead {
         host: request.host,
@@ -543,7 +544,7 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
     }
     let requested = request.path.as_deref().unwrap_or(".");
     validate_path(requested)?;
-    let path = RemotePath::resolve(&host.profile.root, requested)?;
+    let path = resolve_path(host.profile.root.as_str(), requested)?;
     let max_results = request.max_results.unwrap_or(DEFAULT_SEARCH_RESULTS);
     if !(1..=MAX_SEARCH_RESULTS).contains(&max_results) {
         return Err(BridgeError::invalid_argument(
@@ -553,13 +554,14 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
     validate_frame(
         host.limits,
         std::iter::once(request.query.len())
-            .chain(std::iter::once(path.absolute().len()))
+            .chain(std::iter::once(path.as_str().len()))
             .chain(request.globs.iter().map(|glob| glob.len() + 1)),
     )?;
     Ok(ResolvedSearch {
         host: request.host,
         query: request.query,
         path,
+        absolute_path: requested.starts_with('/'),
         globs: request.globs,
         max_results,
         binary: request.binary.unwrap_or(false),
@@ -571,9 +573,29 @@ fn resolve_paths(root: &str, values: &[String]) -> BridgeResult<Vec<RemotePath>>
         .iter()
         .map(|value| {
             validate_path(value)?;
-            RemotePath::resolve(root, value)
+            resolve_path(root, value)
         })
         .collect()
+}
+
+fn resolve_path(configured_root: &str, requested: &str) -> BridgeResult<RemotePath> {
+    if requested.starts_with('/') {
+        // Absolute MCP paths are authoritative and never inherit a hidden
+        // per-host working directory.
+        RemotePath::absolute(requested)
+    } else {
+        // Keep the direct Rust and human CLI compatibility layer until the
+        // configuration-v2 gate removes per-host roots. A missing path still
+        // defaults to the configured root, including for a `/` profile.
+        if configured_root == crate::REMOTE_OPERATION_ROOT && requested != "." {
+            return Err(BridgeError::new(
+                ErrorCode::RemoteAbsolutePathRequired,
+                "remote MCP paths must be absolute; provide an absolute path or cwd",
+                false,
+            ));
+        }
+        RemotePath::resolve(configured_root, requested)
+    }
 }
 
 fn validate_path(path: &str) -> BridgeResult<()> {

@@ -161,6 +161,8 @@ The nine MCP tools are:
 
 The default flow is bounded search/read → unified patch → remote verification. Calls are synchronous. Oversized detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 
+Every MCP filesystem path and `remote_run.cwd` is required and absolute. The bridge never infers a remote working directory from SSH home, a host profile, a previous call, or the current task. Unified patch headers likewise use absolute remote paths or `/dev/null`.
+
 `remote_run` accepts one command string plus `shell: bash|sh|login`; omitting `shell` means Bash. Prefer POSIX syntax and request `sh` explicitly when Bash is unavailable. A Bash request fails closed instead of silently changing command meaning. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, warnings, exit status, truncation, and process-continuation uncertainty.
 
 Operational requests are multiplexed over one persistent SSH session per alias and can run concurrently up to configured capacity. Each request has an independent process group and cancellation; mutations are not implicitly serialized, so concurrent same-path calls have no ordering guarantee. If cancellation cannot be confirmed, the session is closed and the result is explicitly marked unknown rather than retried.

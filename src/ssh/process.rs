@@ -198,7 +198,7 @@ impl SshRunner {
     ) -> BridgeResult<RunResult> {
         let operation_started = Instant::now();
         let host = self.config.host(&request.host)?;
-        let root = host.profile.root.clone();
+        let root = operation_root_for_path(&host.profile.root, &request.cwd);
         let limits = host.limits;
         validate_request(&request, limits)?;
 
@@ -585,7 +585,8 @@ impl SshRunner {
     ) -> BridgeResult<FixedRunResult> {
         let host = self.config.host(&request.host)?;
         let limits = host.limits;
-        let root = host.profile.root.clone();
+        let absolute_paths = fixed_request_uses_absolute_paths(&request, &host.profile.root);
+        let root = operation_root(&host.profile.root, absolute_paths);
         if request.timeout.is_zero()
             || request.timeout > Duration::from_millis(limits.command_timeout_ms)
         {
@@ -1664,7 +1665,7 @@ fn pin_fixed_inputs(
                 false,
             )
         })?;
-        *argument = root_relative_one(configured.absolute(), argument)?;
+        *argument = root_relative_one(configured.as_str(), argument)?;
     }
     if rooted.stdin_nul_paths {
         let stdin = stdin.ok_or_else(|| {
@@ -1683,10 +1684,8 @@ fn pin_fixed_inputs(
         }
         let mut rewritten = Vec::with_capacity(stdin.len());
         for field in stdin[..stdin.len() - 1].split(|byte| *byte == 0) {
-            rewritten.extend_from_slice(&root_relative_bytes(
-                configured.absolute().as_bytes(),
-                field,
-            )?);
+            rewritten
+                .extend_from_slice(&root_relative_bytes(configured.as_str().as_bytes(), field)?);
             rewritten.push(0);
         }
         *stdin = rewritten;
@@ -1700,6 +1699,53 @@ fn root_relative_one(configured_root: &str, path: &str) -> BridgeResult<String> 
         path.as_bytes(),
     )?)
     .map_err(|_| rooted_path_error())
+}
+
+fn operation_root(configured_root: &str, absolute_paths: bool) -> String {
+    if absolute_paths {
+        crate::REMOTE_OPERATION_ROOT.to_owned()
+    } else {
+        configured_root.to_owned()
+    }
+}
+
+fn operation_root_for_path(configured_root: &str, requested: &str) -> String {
+    if requested.starts_with('/') && RemotePath::resolve(configured_root, requested).is_err() {
+        crate::REMOTE_OPERATION_ROOT.to_owned()
+    } else {
+        configured_root.to_owned()
+    }
+}
+
+fn fixed_request_uses_absolute_paths(request: &FixedRunRequest, configured_root: &str) -> bool {
+    let mut saw_absolute = false;
+    for index in request.rooted_paths.argument_indices {
+        if let Some(path) = request
+            .args
+            .get(*index)
+            .filter(|path| path.starts_with('/'))
+        {
+            saw_absolute = true;
+            if RemotePath::resolve(configured_root, path).is_err() {
+                return true;
+            }
+        }
+    }
+    if let Some(stdin) = request.stdin.as_deref() {
+        for path in stdin
+            .split(|byte| *byte == 0)
+            .filter(|path| path.starts_with(b"/"))
+        {
+            saw_absolute = true;
+            if std::str::from_utf8(path)
+                .ok()
+                .is_none_or(|path| RemotePath::resolve(configured_root, path).is_err())
+            {
+                return true;
+            }
+        }
+    }
+    saw_absolute && configured_root == crate::REMOTE_OPERATION_ROOT
 }
 
 fn root_relative_bytes(configured_root: &[u8], path: &[u8]) -> BridgeResult<Vec<u8>> {

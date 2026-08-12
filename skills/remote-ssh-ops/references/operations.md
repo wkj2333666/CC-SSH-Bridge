@@ -34,23 +34,23 @@ The first operation performs local SSH identity checks and a bounded capability 
 
 ## MCP tool shapes
 
-All objects reject unknown fields. Paths are relative to the configured remote root unless an allowed absolute path is supplied.
+All objects reject unknown fields. MCP paths are absolute remote paths. The bridge never infers a path from SSH home, a configured profile root, a previous call, or an implicit workspace.
 
 | Tool | Required input | Optional input |
 |---|---|---|
 | `remote_hosts` | none; pass `{}` | none |
-| `remote_list` | `host` | `path`, `depth`, `include_hidden`, `max_entries` |
-| `remote_stat` | `host`, `paths` array | none |
-| `remote_search` | `host`, `query` | `path`, `globs`, `max_results`, `binary` |
-| `remote_read` | `host`, `paths` array | `start_line`, `max_lines`, `max_bytes` |
+| `remote_list` | `host`, absolute `path` | `depth`, `include_hidden`, `max_entries` |
+| `remote_stat` | `host`, absolute `paths` array | none |
+| `remote_search` | `host`, `query`, absolute `path` | `globs`, `max_results`, `binary` |
+| `remote_read` | `host`, absolute `paths` array | `start_line`, `max_lines`, `max_bytes` |
 | `remote_output_read` | `output_ref`, `stream` | `offset`, `max_bytes` |
 | `remote_apply_patch` | `host`, unified `patch` | none |
-| `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
-| `remote_run` | `host`, `command` string | `cwd`, `shell`, `timeout_ms`, encoded `stdin` |
+| `remote_write` | `host`, absolute `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
+| `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
 
 `remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits because it snapshots every base before the first mutation and reports confirmed, unchanged, and outcome-unknown paths.
 
-Search queries are case-sensitive fixed strings, not regular expressions. Unified patch `a/...` and `b/...` paths are relative to the configured remote root. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
+Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers use absolute remote paths, with `/dev/null` denoting create or delete. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
 
 ## Shell behavior
 

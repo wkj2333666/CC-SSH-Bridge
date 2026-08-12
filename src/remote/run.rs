@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use crate::capability::{ShellKind, ShellRequest};
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{CapturedOutput, OutputPreview};
-use crate::path::RemotePath;
 
 use super::{
     EncodedOutputPreview, POSIX_SH_WARNING, RemoteBridge, RemoteRunRequest, RemoteRunResult,
@@ -34,7 +33,7 @@ pub(super) async fn run(
 
     let requested_cwd = request.cwd.as_deref().unwrap_or(".");
     super::validate_path(requested_cwd)?;
-    let cwd = RemotePath::resolve(&host.profile.root, requested_cwd)?;
+    let cwd = super::resolve_path(host.profile.root.as_str(), requested_cwd)?;
     let stdin = decode_stdin(request.stdin, host.limits.max_write_bytes)?;
     let timeout_ms = request.timeout_ms.unwrap_or(host.limits.command_timeout_ms);
     if timeout_ms == 0 || timeout_ms > host.limits.command_timeout_ms {
@@ -50,7 +49,7 @@ pub(super) async fn run(
             crate::ssh::RunRequest {
                 host: host_name.clone(),
                 command: request.command,
-                cwd: cwd.absolute().to_owned(),
+                cwd: cwd.as_str().to_owned(),
                 shell: map_shell(request.shell),
                 stdin,
                 timeout: Duration::from_millis(timeout_ms),

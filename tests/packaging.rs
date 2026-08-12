@@ -283,7 +283,7 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
         "stdin is an object",
         "encoding",
         "value",
-        "relative to the configured remote root",
+        "absolute remote path",
     ] {
         assert!(
             skill.contains(required),
