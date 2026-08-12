@@ -1682,6 +1682,19 @@ async fn wait_for_file(path: &std::path::Path) {
     .expect("fake SSH file");
 }
 
+async fn wait_for_pid(path: &std::path::Path) -> u32 {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(path).unwrap_or_default().trim().parse() {
+                return pid;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fake SSH PID")
+}
+
 async fn wait_for_process_exit(pid: u32) {
     let process = std::path::PathBuf::from(format!("/proc/{pid}"));
     timeout(Duration::from_millis(200), async {
@@ -2637,12 +2650,7 @@ async fn cancellation_during_ssh_g_kills_its_group_without_remote_detach_warning
         })
     };
     wait_for_log_marker(&log, "G").await;
-    wait_for_file(&pid_file).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_pid(&pid_file).await;
     cancel.cancel();
     let error = timeout(Duration::from_millis(250), task)
         .await
@@ -2743,12 +2751,7 @@ async fn cancellation_during_capability_probe_is_remote_best_effort_and_kills_th
         })
     };
     wait_for_log_marker(&log, "P").await;
-    wait_for_file(&pid_file).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_pid(&pid_file).await;
     cancel.cancel();
     let error = timeout(Duration::from_millis(250), task)
         .await
@@ -2792,13 +2795,8 @@ async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_e
                 .await
         })
     };
-    wait_for_file(&pid_file).await;
+    let pid = wait_for_pid(&pid_file).await;
     wait_for_file(&parent_exit).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     sleep(Duration::from_millis(20)).await;
     cancel.cancel();
     let result = timeout(Duration::from_millis(250), &mut task).await;
@@ -2846,13 +2844,8 @@ async fn deadline_still_kills_pipe_inheriting_descendants_after_ssh_parent_exit(
                 .await
         })
     };
-    wait_for_file(&pid_file).await;
+    let pid = wait_for_pid(&pid_file).await;
     wait_for_file(&parent_exit).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     let result = timeout(Duration::from_millis(450), &mut task).await;
     let error = match result {
         Ok(result) => result.unwrap().unwrap_err(),
@@ -2900,14 +2893,9 @@ async fn cancellation_kills_an_orphan_stdin_holder_after_ssh_parent_exit() {
         let token = cancel.clone();
         tokio::spawn(async move { runner.execute(run, token).await })
     };
-    wait_for_file(&pid_file).await;
+    let pid = wait_for_pid(&pid_file).await;
     wait_for_file(&ready_file).await;
     wait_for_file(&parent_exit).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     sleep(Duration::from_millis(20)).await;
     let cancelled_at = Instant::now();
     cancel.cancel();
@@ -2958,14 +2946,9 @@ async fn deadline_kills_an_orphan_stdin_holder_after_ssh_parent_exit() {
         let runner = Arc::clone(&fixture.runner);
         tokio::spawn(async move { runner.execute(run, CancellationToken::new()).await })
     };
-    wait_for_file(&pid_file).await;
+    let pid = wait_for_pid(&pid_file).await;
     wait_for_file(&ready_file).await;
     wait_for_file(&parent_exit).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     let result = timeout(Duration::from_millis(350), &mut task).await;
     let error = match result {
         Ok(result) => result.unwrap().unwrap_err(),
