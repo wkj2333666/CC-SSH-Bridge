@@ -542,6 +542,10 @@ impl EditCache {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "direct barrier locking remains covered by the isolated state-machine test"
+    )]
     pub(crate) async fn begin_barrier(&self, host: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let runtime = self.host_runtime(host).await;
         Arc::clone(&runtime.preparation).lock_owned().await
