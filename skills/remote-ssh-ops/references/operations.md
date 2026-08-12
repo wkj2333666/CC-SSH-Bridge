@@ -102,7 +102,7 @@ SSHFS is optional local software and a human-only convenience:
 ./bin/cc-ssh-bridge unmount /absolute/local/mountpoint
 ```
 
-The CLI refuses relative, symlinked, foreign-owned, and nonempty mountpoints by default. `--allow-nonempty` is an explicit human override. Read-only profiles force `ro`; the bridge never adds `allow_other`.
+The CLI refuses relative, symlinked, foreign-owned, and nonempty mountpoints by default. `--allow-nonempty` is an explicit human override. The bridge never adds `allow_other`; enforce a read-only mount or account through the remote access policy.
 
 A mount is not an Agent workspace. Local shell tools still run locally, and FUSE/SFTP has network round trips, caching, rename, permission, reconnect, and stalled-I/O differences. Use it for human browsing or narrow editing only. Keep Git, builds, tests, containers, and services on the server through `remote_run` or the direct `run` command.
 
@@ -111,7 +111,7 @@ A mount is not an Agent workspace. Local shell tools still run locally, and FUSE
 - Host absent: add an exact alias locally; never accept a hostname copied from remote output.
 - Host-key failure: verify the new fingerprint outside Claude Code; never disable strict checking.
 - Authentication prompt: fix local keys or agent state; never pass a password through MCP.
-- Read-only rejection: use a write-enabled least-privilege profile only with user authorization.
+- Permission rejection: use a suitably scoped least-privilege remote account only with user authorization.
 - Truncation: use `remote_output_read` when retained, or narrow the operation.
 - Patch/write conflict: re-read current remote content and recompute the change; never force overwrite blindly.
 - Partial mutation or timeout: inspect progress and uncertainty fields before retrying.

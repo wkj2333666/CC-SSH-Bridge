@@ -2,8 +2,10 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +30,132 @@ use tokio_util::sync::CancellationToken;
 use serde::Serialize;
 use serde::ser::{SerializeSeq, Serializer};
 
-fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+struct FixtureBridge {
+    inner: RemoteBridge,
+    root: PathBuf,
+}
+
+impl FixtureBridge {
+    fn new(inner: RemoteBridge, root: &Path) -> Self {
+        Self {
+            inner,
+            root: root.to_owned(),
+        }
+    }
+
+    fn absolute(&self, path: String) -> String {
+        if path.starts_with('/') {
+            path
+        } else {
+            self.root.join(path).to_string_lossy().into_owned()
+        }
+    }
+
+    fn absolute_optional(&self, path: Option<String>) -> Option<String> {
+        Some(match path {
+            Some(path) => self.absolute(path),
+            None => self.root.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn absolute_patch(&self, patch: String) -> String {
+        let root = self.root.to_string_lossy();
+        patch
+            .split_inclusive('\n')
+            .map(|line| {
+                for prefix in ["--- a/", "+++ b/"] {
+                    if let Some(remainder) = line.strip_prefix(prefix)
+                        && !remainder.starts_with('/')
+                    {
+                        return format!("{prefix}{root}/{remainder}");
+                    }
+                }
+                line.to_owned()
+            })
+            .collect()
+    }
+
+    async fn list(
+        &self,
+        mut request: ListRequest,
+        cancel: CancellationToken,
+    ) -> Result<ListResult, BridgeError> {
+        request.path = self.absolute_optional(request.path);
+        self.inner.list(request, cancel).await
+    }
+
+    async fn stat(
+        &self,
+        mut request: StatRequest,
+        cancel: CancellationToken,
+    ) -> Result<StatResult, BridgeError> {
+        request.paths = request
+            .paths
+            .into_iter()
+            .map(|path| self.absolute(path))
+            .collect();
+        self.inner.stat(request, cancel).await
+    }
+
+    async fn read(
+        &self,
+        mut request: ReadRequest,
+        cancel: CancellationToken,
+    ) -> Result<ReadResult, BridgeError> {
+        request.paths = request
+            .paths
+            .into_iter()
+            .map(|path| self.absolute(path))
+            .collect();
+        self.inner.read(request, cancel).await
+    }
+
+    async fn search(
+        &self,
+        mut request: SearchRequest,
+        cancel: CancellationToken,
+    ) -> Result<SearchResult, BridgeError> {
+        request.path = self.absolute_optional(request.path);
+        self.inner.search(request, cancel).await
+    }
+
+    async fn run(
+        &self,
+        mut request: RemoteRunRequest,
+        cancel: CancellationToken,
+    ) -> Result<cc_ssh_bridge::remote::RemoteRunResult, BridgeError> {
+        request.cwd = self.absolute_optional(request.cwd);
+        self.inner.run(request, cancel).await
+    }
+
+    async fn write(
+        &self,
+        mut request: WriteRequest,
+        cancel: CancellationToken,
+    ) -> Result<WriteResult, BridgeError> {
+        request.path = self.absolute(request.path);
+        self.inner.write(request, cancel).await
+    }
+
+    async fn apply_patch(
+        &self,
+        mut request: ApplyPatchRequest,
+        cancel: CancellationToken,
+    ) -> Result<ApplyPatchResult, BridgeError> {
+        request.patch = self.absolute_patch(request.patch);
+        self.inner.apply_patch(request, cancel).await
+    }
+}
+
+impl Deref for FixtureBridge {
+    type Target = RemoteBridge;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     fixture_with_options(root, rg, None, &[])
 }
 
@@ -37,7 +164,7 @@ fn fixture_with_options(
     rg: bool,
     max_frame: Option<usize>,
     extra: &[(&str, OsString)],
-) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -50,7 +177,7 @@ fn fixture_with_options(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     for (key, value) in extra {
         environment.insert(OsString::from(key), value.clone());
@@ -80,7 +207,7 @@ fn fixture_with_options(
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(Arc::clone(&runner));
+    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
     (runtime_base, runner, bridge)
 }
 
@@ -90,7 +217,7 @@ fn fixture_with_probed_login_shell(
 ) -> (
     tempfile::TempDir,
     Arc<SshRunner>,
-    RemoteBridge,
+    FixtureBridge,
     tempfile::TempDir,
 ) {
     use std::os::unix::fs::MetadataExt;
@@ -130,7 +257,7 @@ fn fixture_with_patch_policy(
     max_output_bytes: Option<u64>,
     read_only: bool,
     extra: &[(&str, OsString)],
-) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -147,7 +274,7 @@ fn fixture_with_patch_policy(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     for (key, value) in extra {
         environment.insert(OsString::from(key), value.clone());
@@ -162,7 +289,7 @@ fn fixture_with_patch_policy(
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(Arc::clone(&runner));
+    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
     (runtime_base, runner, bridge)
 }
 
@@ -180,7 +307,7 @@ fn context() -> RemoteContext {
     }
 }
 
-async fn cached_context(bridge: &RemoteBridge) -> RemoteContext {
+async fn cached_context(bridge: &FixtureBridge) -> RemoteContext {
     bridge
         .stat(
             StatRequest {
@@ -229,16 +356,7 @@ async fn retention_rejects_uncached_or_forged_remote_provenance_before_serializi
     assert_eq!(spool_file_count(runtime.path()), 0);
 
     let valid = cached_context(&bridge).await;
-    let cached_shell = bridge
-        .hosts()
-        .await
-        .unwrap()
-        .hosts
-        .into_iter()
-        .find(|host| host.host == "dev")
-        .unwrap()
-        .shell
-        .unwrap();
+    let cached_shell = valid.shell.clone();
     let mut invalid = Vec::new();
     let mut remote_false = valid.clone();
     remote_false.remote = false;
@@ -562,10 +680,7 @@ async fn task78_remote_run_is_bridge_owned_and_reports_explicit_shell() {
         ]
     );
     assert_eq!(result.exit_status, 0);
-    assert_eq!(
-        result.context.physical_root,
-        remote.path().to_str().unwrap()
-    );
+    assert_eq!(result.context.physical_root, "/");
     assert!(result.stdout.head.value.contains("sub dir"));
     assert!(result.stdout.head.value.contains("00 01 09"));
 }
@@ -625,28 +740,19 @@ async fn remote_run_nonzero_exit_retains_large_stderr_for_paging() {
 }
 
 #[tokio::test]
-async fn task78_remote_run_rejects_read_only_path_escape_and_nul_before_command_child() {
+async fn task78_remote_run_rejects_relative_cwd_and_nul_before_command_child() {
     let remote = tempfile::TempDir::new().unwrap();
-    for (name, read_only, command, cwd, expected) in [
+    for (name, command, cwd, expected) in [
         (
-            "read-only",
-            true,
-            "printf unsafe",
-            Some("."),
-            ErrorCode::ReadOnlyHost,
-        ),
-        (
-            "escape",
-            false,
+            "relative-cwd",
             "printf unsafe",
             Some("../escape"),
-            ErrorCode::PathOutsideRoot,
+            ErrorCode::RemoteAbsolutePathRequired,
         ),
         (
             "nul",
-            false,
             "printf\0unsafe",
-            Some("."),
+            remote.path().to_str(),
             ErrorCode::InvalidArgument,
         ),
     ] {
@@ -656,10 +762,11 @@ async fn task78_remote_run_rejects_read_only_path_escape_and_nul_before_command_
             remote.path(),
             None,
             None,
-            read_only,
+            false,
             &[("FAKE_SSH_LOG", log.clone().into_os_string())],
         );
         let error = bridge
+            .inner
             .run(
                 RemoteRunRequest {
                     host: "dev".to_owned(),
@@ -806,10 +913,7 @@ async fn task78_remote_run_early_stdin_close_preserves_actual_exit() {
         let result = bridge.run(request, CancellationToken::new()).await.unwrap();
         assert_eq!(result.exit_status, expected_status);
         assert_eq!(result.context.shell.kind, ShellName::Sh);
-        assert_eq!(
-            result.context.physical_root,
-            remote.path().to_str().unwrap()
-        );
+        assert_eq!(result.context.physical_root, "/");
         assert!(!result.remote_process_may_continue);
     }
 }
@@ -842,10 +946,7 @@ async fn task78_remote_run_facade_timeout_retains_selected_context() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::CommandTimeout);
     assert_eq!(error.details.host.as_deref(), Some("dev"));
-    assert_eq!(
-        error.details.physical_root.as_deref(),
-        remote.path().to_str()
-    );
+    assert_eq!(error.details.physical_root.as_deref(), Some("/"));
     assert_eq!(
         error
             .details
@@ -969,11 +1070,11 @@ fn task78_domain_error_remote_context_helper_fills_only_missing_safe_fields() {
     assert_eq!(error.details.shell.as_ref(), Some(&shell));
 }
 
-fn assert_task78_fixed_context(error: &BridgeError, root: &std::path::Path) {
+fn assert_task78_fixed_context(error: &BridgeError, _root: &std::path::Path) {
     assert_eq!(error.details.host.as_deref(), Some("dev"), "{error:?}");
     assert_eq!(
         error.details.physical_root.as_deref(),
-        root.to_str(),
+        Some("/"),
         "{error:?}"
     );
     let shell = error.details.shell.as_ref().expect("fixed shell context");
@@ -1455,7 +1556,7 @@ async fn physical_root_retarget_read_uses_cached_diagnostics_and_new_filesystem_
         )
         .await
         .unwrap();
-    assert_eq!(first_read.context.physical_root, first.to_str().unwrap());
+    assert_eq!(first_read.context.physical_root, "/");
 
     std::fs::remove_file(&active).unwrap();
     symlink(&second, &active).unwrap();
@@ -1472,17 +1573,12 @@ async fn physical_root_retarget_read_uses_cached_diagnostics_and_new_filesystem_
         )
         .await
         .unwrap();
-    assert_eq!(second_read.context.physical_root, first.to_str().unwrap());
+    assert_eq!(second_read.context.physical_root, "/");
     assert!(matches!(
         &second_read.files[0],
         ReadEntry::Success { content, .. } if content.value == "second\n"
     ));
-    assert_eq!(
-        bridge.hosts().await.unwrap().hosts[0]
-            .physical_root
-            .as_deref(),
-        first.to_str()
-    );
+    assert_eq!(bridge.hosts().await.unwrap().hosts[0].host, "dev");
     assert_eq!(
         ssh_call_count(&log, "P"),
         1,
@@ -1764,7 +1860,7 @@ async fn tool_capability_refresh_updates_connection_diagnostics_only() {
         )
         .await
         .unwrap();
-    assert_eq!(refreshed.context.physical_root, second.to_str().unwrap());
+    assert_eq!(refreshed.context.physical_root, "/");
     assert_eq!(ssh_call_count(&log, "P"), 2);
 
     let result = bridge
@@ -2079,21 +2175,12 @@ fn task4_request_and_result_shapes_are_closed_and_serializable() {
 
     let hosts = HostsResult {
         hosts: vec![HostInfo {
-            remote: true,
             host: "dev".to_owned(),
-            configured_root: "/root".to_owned(),
-            description: None,
-            read_only: true,
-            physical_root: None,
-            shell: None,
         }],
     };
     assert_eq!(
         serde_json::to_value(hosts).unwrap(),
-        serde_json::json!({"hosts":[{
-            "remote":true,"host":"dev","configured_root":"/root","description":null,
-            "read_only":true,"physical_root":null,"shell":null
-        }]})
+        serde_json::json!({"hosts":[{"host":"dev"}]})
     );
 
     let list = ListResult {
@@ -2754,10 +2841,7 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("0.2"),
@@ -2798,13 +2882,15 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
     let mut tasks = tokio::task::JoinSet::new();
     for index in 0..HOSTS {
         let bridge = Arc::clone(&bridge);
+        let target = remote.path().join(format!("target-{index}"));
         tasks.spawn(async move {
             bridge
                 .apply_patch(
                     ApplyPatchRequest {
                         host: format!("host-{index}"),
                         patch: format!(
-                            "--- a/target-{index}\n+++ b/target-{index}\n@@ -1 +1 @@\n-x\n+y\n"
+                            "--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n",
+                            path = target.display()
                         ),
                     },
                     CancellationToken::new(),
@@ -3096,7 +3182,7 @@ async fn task6_snapshot_reserves_protocol_within_the_host_output_limit() {
 }
 
 #[tokio::test]
-async fn task6_host_policy_rejections_are_preparse_without_progress_or_ssh() {
+async fn task6_host_and_limit_rejections_are_preparse_without_progress_or_ssh() {
     let remote = tempfile::TempDir::new().unwrap();
     let controls = tempfile::TempDir::new().unwrap();
     let ssh_log = controls.path().join("ssh");
@@ -3112,24 +3198,6 @@ async fn task6_host_policy_rejections_are_preparse_without_progress_or_ssh() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "missing".to_owned(),
-                patch: patch.to_owned(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-    let (_runtime, _runner, readonly) = fixture_with_patch_policy(
-        remote.path(),
-        None,
-        None,
-        true,
-        &[("FAKE_SSH_LOG", ssh_log.as_os_str().to_owned())],
-    );
-    let readonly = readonly
-        .apply_patch(
-            ApplyPatchRequest {
-                host: "dev".to_owned(),
                 patch: patch.to_owned(),
             },
             CancellationToken::new(),
@@ -3156,9 +3224,8 @@ async fn task6_host_policy_rejections_are_preparse_without_progress_or_ssh() {
         .unwrap_err();
 
     assert_eq!(invalid_host.code, ErrorCode::InvalidConfig);
-    assert_eq!(readonly.code, ErrorCode::ReadOnlyHost);
     assert_eq!(limited.code, ErrorCode::RequestTooLarge);
-    for error in [invalid_host, readonly, limited] {
+    for error in [invalid_host, limited] {
         assert_eq!(error.details.failed_path, None);
         assert_eq!(error.details.changed_paths, None);
         assert_eq!(error.details.not_changed_paths, None);
@@ -3780,7 +3847,7 @@ async fn task6_assert_cached_root_drift_is_definite_conflict(delete: bool) {
         )
         .await
         .unwrap();
-    assert_eq!(reprobe.context.physical_root, second_root.to_str().unwrap());
+    assert_eq!(reprobe.context.physical_root, "/");
     std::fs::write(&gate, b"release").unwrap();
 
     let error = tokio::time::timeout(Duration::from_secs(2), task)
@@ -3998,10 +4065,7 @@ async fn task5_base64_is_strict_and_oversize_preflight_launches_nothing() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_LOG"),
             oversize_log.as_os_str().to_owned(),
@@ -4022,7 +4086,11 @@ async fn task5_base64_is_strict_and_oversize_preflight_launches_nothing() {
         .write(
             WriteRequest {
                 host: "dev".to_owned(),
-                path: "oversize".to_owned(),
+                path: remote
+                    .path()
+                    .join("oversize")
+                    .to_string_lossy()
+                    .into_owned(),
                 content: "QUFBQUE=".to_owned(),
                 encoding: WriteEncoding::Base64,
                 mode: WriteMode::Create,
@@ -4579,20 +4647,26 @@ async fn task5_write_local_validation_and_final_render_bound_launch_zero_process
         None,
         &[("FAKE_SSH_LOG", log.as_os_str().to_owned())],
     );
-    let root = remote.path().to_str().unwrap().to_owned();
     let cases = [
-        ("", ErrorCode::InvalidArgument),
-        (".", ErrorCode::InvalidArgument),
-        (root.as_str(), ErrorCode::InvalidArgument),
-        ("../escape", ErrorCode::PathOutsideRoot),
-        ("nul\0path", ErrorCode::InvalidArgument),
+        ("".to_owned(), ErrorCode::InvalidArgument),
+        (".".to_owned(), ErrorCode::InvalidArgument),
+        ("/".to_owned(), ErrorCode::InvalidArgument),
+        (
+            "../escape".to_owned(),
+            ErrorCode::RemoteAbsolutePathRequired,
+        ),
+        (
+            format!("{}/nul\0path", remote.path().display()),
+            ErrorCode::InvalidArgument,
+        ),
     ];
     for (path, expected) in cases {
         let error = bridge
+            .inner
             .write(
                 WriteRequest {
                     host: "dev".to_owned(),
-                    path: path.to_owned(),
+                    path: path.clone(),
                     content: String::new(),
                     encoding: WriteEncoding::Utf8,
                     mode: WriteMode::Create,
@@ -4604,10 +4678,11 @@ async fn task5_write_local_validation_and_final_render_bound_launch_zero_process
         assert_eq!(error.code, expected, "path={path:?}");
     }
     let error = bridge
+        .inner
         .write(
             WriteRequest {
                 host: "dev".to_owned(),
-                path: "x".repeat(64 * 1024 + 1),
+                path: format!("/{}", "x".repeat(64 * 1024 + 1)),
                 content: String::new(),
                 encoding: WriteEncoding::Utf8,
                 mode: WriteMode::Create,
@@ -4618,10 +4693,11 @@ async fn task5_write_local_validation_and_final_render_bound_launch_zero_process
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::RequestTooLarge);
     let error = bridge
+        .inner
         .write(
             WriteRequest {
                 host: "dev".to_owned(),
-                path: "replace".to_owned(),
+                path: remote.path().join("replace").to_string_lossy().into_owned(),
                 content: "not base64".to_owned(),
                 encoding: WriteEncoding::Base64,
                 mode: WriteMode::Replace {
@@ -4643,10 +4719,15 @@ async fn task5_write_local_validation_and_final_render_bound_launch_zero_process
         &[("FAKE_SSH_LOG", quote_log.as_os_str().to_owned())],
     );
     let error = bridge
+        .inner
         .write(
             WriteRequest {
                 host: "dev".to_owned(),
-                path: "'".repeat(12 * 1024),
+                path: remote
+                    .path()
+                    .join("'".repeat(12 * 1024))
+                    .to_string_lossy()
+                    .into_owned(),
                 content: String::new(),
                 encoding: WriteEncoding::Utf8,
                 mode: WriteMode::Create,
@@ -4657,53 +4738,6 @@ async fn task5_write_local_validation_and_final_render_bound_launch_zero_process
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::RequestTooLarge);
     assert_eq!(ssh_call_count(&quote_log, "G"), 0);
-
-    let runtime_base = tempfile::TempDir::new().unwrap();
-    let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
-    let store = Arc::new(OutputStore::new(&runtime).unwrap());
-    let mut config = support::config_with_host("dev", remote.path().to_str().unwrap());
-    config.hosts.get_mut("dev").unwrap().read_only = true;
-    let readonly_log = runtime_base.path().join("readonly.log");
-    let environment = BTreeMap::from([
-        (
-            OsString::from("FAKE_SSH_MODE"),
-            OsString::from("local-fixed"),
-        ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
-        (
-            OsString::from("FAKE_SSH_LOG"),
-            readonly_log.as_os_str().to_owned(),
-        ),
-    ]);
-    let runner = Arc::new(
-        SshRunner::with_executable(
-            Arc::new(config),
-            runtime,
-            store,
-            support::fake_ssh_path(),
-            environment,
-        )
-        .unwrap(),
-    );
-    let bridge = RemoteBridge::new(runner);
-    let error = bridge
-        .write(
-            WriteRequest {
-                host: "dev".to_owned(),
-                path: "readonly".to_owned(),
-                content: "not base64".to_owned(),
-                encoding: WriteEncoding::Base64,
-                mode: WriteMode::Create,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::ReadOnlyHost);
-    assert_eq!(ssh_call_count(&readonly_log, "G"), 0);
 }
 
 #[tokio::test]
@@ -5896,10 +5930,7 @@ async fn output_read_requires_and_uses_command_provenance() {
         .unwrap_err();
     assert_eq!(offset_error.code, ErrorCode::InvalidArgument);
     assert_eq!(offset_error.details.host.as_deref(), Some("dev"));
-    assert_eq!(
-        offset_error.details.physical_root.as_deref(),
-        remote.path().to_str()
-    );
+    assert_eq!(offset_error.details.physical_root.as_deref(), Some("/"));
     assert!(offset_error.details.shell.is_some());
 
     let cancel = CancellationToken::new();
@@ -5918,10 +5949,7 @@ async fn output_read_requires_and_uses_command_provenance() {
         .unwrap_err();
     assert_eq!(cancel_error.code, ErrorCode::Cancelled);
     assert_eq!(cancel_error.details.host.as_deref(), Some("dev"));
-    assert_eq!(
-        cancel_error.details.physical_root.as_deref(),
-        remote.path().to_str()
-    );
+    assert_eq!(cancel_error.details.physical_root.as_deref(), Some("/"));
     assert!(cancel_error.details.shell.is_some());
 }
 
@@ -5953,10 +5981,7 @@ async fn readonly_real_mismatch_retries_exactly_once_from_the_list_script() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("PATH"),
             OsString::from(format!(
@@ -5985,7 +6010,7 @@ async fn readonly_real_mismatch_retries_exactly_once_from_the_list_script() {
         .list(
             ListRequest {
                 host: "dev".into(),
-                path: None,
+                path: Some(remote.path().to_string_lossy().into_owned()),
                 depth: None,
                 include_hidden: None,
                 max_entries: None,
@@ -6773,7 +6798,7 @@ async fn hosts_are_local_and_list_and_read_bounds_are_exact() {
     }
     let (_runtime, _runner, bridge) = fixture(remote.path(), false);
     let hosts = bridge.hosts().await.unwrap();
-    assert_eq!(hosts.hosts[0].physical_root, None);
+    assert_eq!(hosts.hosts[0].host, "dev");
     let list = bridge
         .list(
             ListRequest {
@@ -6821,10 +6846,7 @@ async fn aborting_a_fixed_facade_unlinks_internal_spools_without_ttl() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("0.5"),
@@ -6849,12 +6871,13 @@ async fn aborting_a_fixed_facade_unlinks_internal_spools_without_ttl() {
         .unwrap(),
     );
     let bridge = RemoteBridge::new(runner);
+    let list_path = remote.path().to_string_lossy().into_owned();
     let task = tokio::spawn(async move {
         bridge
             .list(
                 ListRequest {
                     host: "dev".into(),
-                    path: None,
+                    path: Some(list_path),
                     depth: None,
                     include_hidden: None,
                     max_entries: None,
@@ -7026,10 +7049,7 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            roots[0].as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_LOG"),
             ssh_log.as_os_str().to_owned(),
@@ -7103,12 +7123,13 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
     let mut tasks = tokio::task::JoinSet::new();
     for (index, content) in sources.drain(..).enumerate() {
         let bridge = Arc::clone(&bridge);
+        let target = roots[index].join("payload").to_string_lossy().into_owned();
         tasks.spawn(async move {
             let result = bridge
                 .write(
                     WriteRequest {
                         host: format!("h{index}"),
-                        path: "payload".to_owned(),
+                        path: target,
                         content,
                         encoding: WriteEncoding::Base64,
                         mode: WriteMode::Create,
@@ -7199,10 +7220,7 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("large-candidates"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("0.3"),
@@ -7258,7 +7276,7 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
                 .search(
                     SearchRequest {
                         host: format!("h{index}"),
-                        path: None,
+                        path: Some("/".to_owned()),
                         query: "needle".into(),
                         globs: vec!["accept/**".into()],
                         max_results: None,
@@ -7684,10 +7702,7 @@ async fn read_hash_before_after_race_is_a_contentless_read_conflict() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     let config = Arc::new(support::config_with_host(
@@ -7705,12 +7720,13 @@ async fn read_hash_before_after_race_is_a_contentless_read_conflict() {
         .unwrap(),
     );
     let bridge = RemoteBridge::new(runner);
+    let racing_path = path.to_string_lossy().into_owned();
     let task = tokio::spawn(async move {
         bridge
             .read(
                 ReadRequest {
                     host: "dev".into(),
-                    paths: vec!["racing".into()],
+                    paths: vec![racing_path],
                     start_line: None,
                     max_lines: Some(1),
                     max_bytes: Some(1),

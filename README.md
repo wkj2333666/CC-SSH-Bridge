@@ -188,7 +188,7 @@ mkdir -p /absolute/local/mountpoint
 ./bin/cc-ssh-bridge unmount /absolute/local/mountpoint
 ```
 
-The CLI requires a real absolute current-user-owned mountpoint, refuses nonempty directories without `--allow-nonempty`, forces `ro` for read-only profiles, and never enables `allow_other`. It prints that the mount is remote and not an Agent workspace.
+The CLI requires a real absolute current-user-owned mountpoint, refuses nonempty directories without `--allow-nonempty`, and never enables `allow_other`. Read-only behavior must come from the remote access policy. It prints that the mount is remote and not an Agent workspace.
 
 Use SSHFS for browsing or narrow human editing. Keep builds, Git, tests, containers, and services on the server through `remote_run`. SFTP/FUSE workloads add a round trip to many metadata operations; caching, permissions, hardlinks, rename behavior, and broken-connection recovery also differ from a native filesystem. See the [SSHFS documentation](https://github.com/libfuse/sshfs).
 

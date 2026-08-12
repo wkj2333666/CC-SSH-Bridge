@@ -42,7 +42,7 @@ Prefer POSIX command syntax. Omitting `shell` requests Bash. Request `shell:"sh"
 
 Requests on one host are concurrent up to bridge capacity; mutations are not implicitly serialized. Do not rely on ordering between concurrent calls. A timeout or cancellation targets only its request first; if the dispatcher cannot confirm termination, the session is closed and the result marks the remote outcome as unknown. Every MCP path and command working directory is an explicit absolute remote path; symlink retargeting follows ordinary server filesystem semantics. A failed dispatcher handshake is a hard error and must not silently fall back to a one-shot SSH command.
 
-Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect read-only profiles and obtain authorization for destructive or high-impact work.
+Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect remote account and filesystem policy, and obtain authorization for destructive or high-impact work.
 
 ## SSHFS
 
