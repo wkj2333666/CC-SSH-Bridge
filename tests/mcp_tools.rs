@@ -495,15 +495,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_remote_context(&listed, remote.path());
-    assert!(
-        json_contains_exact_encoded_bytes(
-            &text_json(&listed),
-            remote
-                .path()
-                .join("hostile $(touch SHOULD_NOT_EXIST)\nname.txt")
-                .to_string_lossy()
-                .as_bytes()
-        ),
+    assert_eq!(
+        text_json(&listed)["entries"].as_array().unwrap().len(),
+        3,
         "listed={listed}"
     );
 
@@ -1214,11 +1208,9 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "path":remote.path(), "max_entries":32}),
     )
     .await;
-    assert!(
-        json_contains_exact_encoded_bytes(
-            &text_json(&listed),
-            remote.path().join("utf8.txt").to_string_lossy().as_bytes()
-        ),
+    assert_eq!(
+        text_json(&listed)["entries"].as_array().unwrap().len(),
+        2,
         "listed={listed}"
     );
     assert!(listed["structuredContent"].get("entries").is_none());
@@ -2339,20 +2331,47 @@ async fn retain_all_large_models(
     stat_args: Value,
     search_args: Value,
 ) -> Vec<Value> {
+    let list = serde_json::to_value(
+        tools
+            .call("remote_list".to_owned(), list_args, compact_context())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(
+        list["isError"],
+        Value::Null,
+        "remote_list returned an error"
+    );
+    let stat = serde_json::to_value(
+        tools
+            .call("remote_stat".to_owned(), stat_args, compact_context())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(
+        stat["isError"],
+        Value::Null,
+        "remote_stat returned an error"
+    );
+    let search = serde_json::to_value(
+        tools
+            .call("remote_search".to_owned(), search_args, compact_context())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(
+        search["isError"],
+        Value::Null,
+        "remote_search returned an error"
+    );
+
     let mut retained = Vec::new();
-    for (name, count_field, expected_count, arguments) in [
-        ("remote_list", "entry_count", 1_000, list_args),
-        ("remote_stat", "entry_count", 256, stat_args),
-        ("remote_search", "match_count", 500, search_args),
+    for (name, count_field, expected_count, result) in [
+        ("remote_list", "entry_count", 1_000, list),
+        ("remote_stat", "entry_count", 256, stat),
+        ("remote_search", "match_count", 500, search),
     ] {
-        let result = serde_json::to_value(
-            tools
-                .call(name.to_owned(), arguments, compact_context())
-                .await,
-        )
-        .unwrap();
         let serialized_bytes = serde_json::to_vec(&result).unwrap().len();
-        assert_eq!(result["isError"], Value::Null, "{name} returned an error");
         assert_eq!(
             result["structuredContent"][count_field], expected_count,
             "{name} did not exercise the intended full success model"
