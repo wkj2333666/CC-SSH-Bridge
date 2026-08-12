@@ -18,7 +18,6 @@ use cc_ssh_bridge::output::OutputStore;
 use cc_ssh_bridge::remote::RemoteBridge;
 use cc_ssh_bridge::ssh::SshRunner;
 use cc_ssh_bridge::ssh::{RuntimePaths, SshPolicy, build_sshfs_argv, validate_sshfs_mountpoint};
-use cc_ssh_bridge::ErrorCode;
 use predicates::prelude::*;
 
 fn bridge_command(config: &std::path::Path, runtime: &std::path::Path) -> Command {
@@ -494,7 +493,10 @@ async fn task9_bash_run_fails_when_bash_is_unavailable() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, ErrorCode::RemoteCapabilityMissing);
+    assert_eq!(
+        error.code,
+        cc_ssh_bridge::error::ErrorCode::RemoteCapabilityMissing
+    );
 }
 
 #[tokio::test]
