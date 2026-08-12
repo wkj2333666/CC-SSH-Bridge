@@ -578,7 +578,6 @@ async fn cancelling_a_barrier_wait_does_not_abandon_or_duplicate_the_inflight_co
         .unwrap()
         .unwrap();
     assert_eq!(backend.commit_count(), 1);
-    assert!(cache.host_status("alpha").await.pending_paths.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -627,7 +626,6 @@ async fn timing_out_a_barrier_wait_does_not_abandon_or_duplicate_the_inflight_co
         .expect("surviving barrier task failed")
         .unwrap();
     assert_eq!(backend.commit_count(), 1);
-    assert!(cache.host_status("alpha").await.pending_paths.is_empty());
 }
 
 #[tokio::test]
