@@ -498,7 +498,11 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     assert!(
         json_contains_exact_encoded_bytes(
             &text_json(&listed),
-            b"hostile $(touch SHOULD_NOT_EXIST)\nname.txt"
+            remote
+                .path()
+                .join("hostile $(touch SHOULD_NOT_EXIST)\nname.txt")
+                .to_string_lossy()
+                .as_bytes()
         ),
         "listed={listed}"
     );
@@ -1211,7 +1215,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     )
     .await;
     assert!(
-        json_contains_exact_encoded_bytes(&text_json(&listed), b"utf8.txt"),
+        json_contains_exact_encoded_bytes(
+            &text_json(&listed),
+            remote.path().join("utf8.txt").to_string_lossy().as_bytes()
+        ),
         "listed={listed}"
     );
     assert!(listed["structuredContent"].get("entries").is_none());
@@ -2266,12 +2273,14 @@ fn retention_models_fixture(
         root.push(format!("root-{index:02}-{}", "r".repeat(224)));
         std::fs::create_dir(&root).unwrap();
     }
+    let search_root = root.join("search-model");
+    std::fs::create_dir(&search_root).unwrap();
+    let search_line = format!("needle {}\n", "s".repeat(2_992));
+    std::fs::write(search_root.join("search.txt"), search_line.repeat(500)).unwrap();
     for index in 0..1_000 {
         let name = format!("list-{index:04}-{}", "l".repeat(180));
         std::fs::write(root.join(name), b"x").unwrap();
     }
-    let search_line = format!("needle {}\n", "s".repeat(2_992));
-    std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
     let stat_paths = (0..256)
         .map(|index| {
             root.join(format!("missing-{index:03}-{}", "p".repeat(2_000)))
@@ -2319,7 +2328,7 @@ fn retention_models_fixture(
         json!({"host":"dev","path":&root,"max_entries":1_000}),
         json!({"host":"dev","paths":stat_paths}),
         json!({
-            "host":"dev","query":"needle","path":&root,"max_results":500
+            "host":"dev","query":"needle","path":search_root,"max_results":500
         }),
     )
 }
