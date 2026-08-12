@@ -90,7 +90,14 @@ pub(crate) enum FixedOperationKind {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RootedPathInputs {
     pub(crate) argument_indices: &'static [usize],
+    pub(crate) argument_stride: Option<RootedArgumentStride>,
     pub(crate) stdin_nul_paths: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RootedArgumentStride {
+    pub(crate) start: usize,
+    pub(crate) step: usize,
 }
 
 #[derive(Clone)]
@@ -1573,6 +1580,18 @@ fn pin_fixed_inputs(
         })?;
         *argument = root_relative_one(configured.as_str(), argument)?;
     }
+    if let Some(stride) = rooted.argument_stride {
+        if stride.step == 0 || stride.start >= args.len() {
+            return Err(BridgeError::new(
+                ErrorCode::ProtocolError,
+                "fixed rooted argument stride is invalid",
+                false,
+            ));
+        }
+        for argument in args.iter_mut().skip(stride.start).step_by(stride.step) {
+            *argument = root_relative_one(configured.as_str(), argument)?;
+        }
+    }
     if rooted.stdin_nul_paths {
         let stdin = stdin.ok_or_else(|| {
             BridgeError::new(
@@ -1783,8 +1802,9 @@ fn elapsed_ms(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildSpec, FixedOperationKind, Phase, SshRunner, capability_probe_command,
-        mutation_unknown, render_fixed_command, render_fixed_command_text,
+        ChildSpec, FixedOperationKind, Phase, RootedArgumentStride, RootedPathInputs, SshRunner,
+        capability_probe_command, mutation_unknown, pin_fixed_inputs, render_fixed_command,
+        render_fixed_command_text,
     };
     use crate::capability::parse_probe_output;
     use crate::config::{Config, HostProfile};
@@ -1823,6 +1843,59 @@ mod tests {
             let capability = parse_probe_output(&output.stdout, &expected).unwrap();
             assert_eq!(capability.physical_root, root);
         }
+    }
+
+    #[test]
+    fn fixed_rooted_argument_stride_rewrites_each_record_path() {
+        let mut args = vec![
+            "/srv/project/first".to_owned(),
+            "first.txt".to_owned(),
+            "mode-a".to_owned(),
+            "/srv/project/nested/second".to_owned(),
+            "second.txt".to_owned(),
+            "mode-b".to_owned(),
+        ];
+        pin_fixed_inputs(
+            "/srv/project",
+            &mut args,
+            None,
+            RootedPathInputs {
+                argument_indices: &[],
+                argument_stride: Some(RootedArgumentStride { start: 0, step: 3 }),
+                stdin_nul_paths: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "./first",
+                "first.txt",
+                "mode-a",
+                "./nested/second",
+                "second.txt",
+                "mode-b",
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_rooted_argument_stride_rejects_zero_step() {
+        let mut args = vec!["/srv/project/first".to_owned()];
+        let error = pin_fixed_inputs(
+            "/srv/project",
+            &mut args,
+            None,
+            RootedPathInputs {
+                argument_indices: &[],
+                argument_stride: Some(RootedArgumentStride { start: 0, step: 0 }),
+                stdin_nul_paths: false,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ProtocolError);
     }
 
     #[test]

@@ -24,6 +24,11 @@ use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
     reason = "the cache state machine is wired into RemoteBridge in batch 6C"
 )]
 mod edit_cache;
+#[allow(
+    dead_code,
+    reason = "the SSH edit backend is wired into RemoteBridge in batch 6D"
+)]
+mod edit_sync;
 mod metadata;
 mod patch;
 mod protocol;
@@ -355,40 +360,44 @@ impl RemoteBridge {
         request: FixedRunRequest,
         cancel: CancellationToken,
     ) -> BridgeResult<FixedRunResult> {
-        let first = self
-            .runner
-            .execute_fixed_once(request.clone(), cancel.clone())
-            .await?;
-        let first_mismatch = protocol::capability_mismatch(&first, request.required_capabilities)
-            .await
-            .map_err(|error| attach_fixed_result_context(error, &request.host, &first))?;
-        match first_mismatch {
-            None => Ok(first),
-            Some(_) => {
-                self.runner.invalidate_capability(&request.host).await;
-                let second = self
-                    .runner
-                    .execute_fixed_once(request.clone(), cancel)
+        execute_readonly_fixed(&self.runner, request, cancel).await
+    }
+}
+
+async fn execute_readonly_fixed(
+    runner: &SshRunner,
+    request: FixedRunRequest,
+    cancel: CancellationToken,
+) -> BridgeResult<FixedRunResult> {
+    let first = runner
+        .execute_fixed_once(request.clone(), cancel.clone())
+        .await?;
+    let first_mismatch = protocol::capability_mismatch(&first, request.required_capabilities)
+        .await
+        .map_err(|error| attach_fixed_result_context(error, &request.host, &first))?;
+    match first_mismatch {
+        None => Ok(first),
+        Some(_) => {
+            runner.invalidate_capability(&request.host).await;
+            let second = runner
+                .execute_fixed_once(request.clone(), cancel)
+                .await
+                .map_err(|error| attach_fixed_result_context(error, &request.host, &first))?;
+            let second_mismatch =
+                protocol::capability_mismatch(&second, request.required_capabilities)
                     .await
-                    .map_err(|error| attach_fixed_result_context(error, &request.host, &first))?;
-                let second_mismatch =
-                    protocol::capability_mismatch(&second, request.required_capabilities)
-                        .await
-                        .map_err(|error| {
-                            attach_fixed_result_context(error, &request.host, &second)
-                        })?;
-                match second_mismatch {
-                    None => Ok(second),
-                    Some(_) => Err(attach_fixed_result_context(
-                        BridgeError::new(
-                            ErrorCode::RemoteCapabilityMissing,
-                            "remote read capability remained unavailable after reprobe",
-                            false,
-                        ),
-                        &request.host,
-                        &second,
-                    )),
-                }
+                    .map_err(|error| attach_fixed_result_context(error, &request.host, &second))?;
+            match second_mismatch {
+                None => Ok(second),
+                Some(_) => Err(attach_fixed_result_context(
+                    BridgeError::new(
+                        ErrorCode::RemoteCapabilityMissing,
+                        "remote read capability remained unavailable after reprobe",
+                        false,
+                    ),
+                    &request.host,
+                    &second,
+                )),
             }
         }
     }
