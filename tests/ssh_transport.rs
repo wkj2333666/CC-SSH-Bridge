@@ -1163,7 +1163,7 @@ fn task5_full_probe_reports_functional_mutation_flags() {
 fn capability_probe_rejects_each_incompatible_exact_behavior() {
     let root = TempDir::new().unwrap();
     let scratch = TempDir::new().unwrap();
-    let system_path = "/usr/local/bin:/usr/bin:/bin";
+    let system_path = std::env::var_os("PATH").expect("test PATH must be set");
     let cases = [
         (
             "read_slice",
@@ -1335,7 +1335,14 @@ fn capability_probe_rejects_each_incompatible_exact_behavior() {
                 "probe",
                 root.path().to_str().unwrap(),
             ])
-            .env("PATH", format!("{}:{system_path}", shim.path().display()))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    shim.path().display(),
+                    system_path.to_string_lossy()
+                ),
+            )
             .env("TMPDIR", scratch.path())
             .output()
             .unwrap();
@@ -1374,6 +1381,7 @@ fn task5_mutation_hash_probe_is_closed_and_restores_shell_state() {
     let shim = TempDir::new().unwrap();
     let count_path = shim.path().join("sha-count");
     let executable = shim.path().join("sha256sum");
+    let system_path = std::env::var_os("PATH").expect("test PATH must be set");
     fs::write(
         &executable,
         format!(
@@ -1393,7 +1401,11 @@ fn task5_mutation_hash_probe_is_closed_and_restores_shell_state() {
         ])
         .env(
             "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", shim.path().display()),
+            format!(
+                "{}:{}",
+                shim.path().display(),
+                system_path.to_string_lossy()
+            ),
         )
         .env("TMPDIR", scratch.path())
         .output()
@@ -1417,6 +1429,7 @@ fn task5_shared_hash_failure_closes_only_mutation_capabilities() {
     let scratch = TempDir::new().unwrap();
     let shim = TempDir::new().unwrap();
     let executable = shim.path().join("sha256sum");
+    let system_path = std::env::var_os("PATH").expect("test PATH must be set");
     fs::write(&executable, "#!/bin/sh\nexit 64\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -1429,7 +1442,11 @@ fn task5_shared_hash_failure_closes_only_mutation_capabilities() {
         ])
         .env(
             "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", shim.path().display()),
+            format!(
+                "{}:{}",
+                shim.path().display(),
+                system_path.to_string_lossy()
+            ),
         )
         .env("TMPDIR", scratch.path())
         .output()
