@@ -124,6 +124,36 @@ fn release_workflow_builds_and_packages_all_common_targets() {
 }
 
 #[test]
+fn cross_architecture_workflow_builds_every_release_binary() {
+    let workflow = read_text(".github/workflows/cross-architecture.yml");
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "armv7-unknown-linux-gnueabihf",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf",
+        "riscv64gc-unknown-linux-gnu",
+        "powerpc64le-unknown-linux-gnu",
+        "s390x-unknown-linux-gnu",
+    ] {
+        assert!(workflow.contains(target), "cross workflow omits {target}");
+    }
+    assert_eq!(workflow.matches("--bin cc-ssh-bridge\n").count(), 3);
+    assert_eq!(
+        workflow
+            .matches("--bin cc-ssh-bridge --bin cc-ssh-bridge-helper")
+            .count(),
+        5
+    );
+    assert_eq!(
+        workflow.matches("bins: --bin cc-ssh-bridge-helper").count(),
+        1
+    );
+    assert!(workflow.contains("workflow_dispatch:"));
+}
+
+#[test]
 fn installed_chain_has_no_python_runtime_or_legacy_module_references() {
     let root = repository_root();
     let mut files = Vec::new();
