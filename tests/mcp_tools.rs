@@ -1853,7 +1853,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
     let mut session =
         ProtocolSession::start_with_limits(tools, cc_ssh_bridge::MAX_FRAME_BYTES, 8).await;
     let started = Instant::now();
-    for (index, (host, _root)) in root_paths.iter().enumerate() {
+    for (index, (host, root)) in root_paths.iter().enumerate() {
         let id = 100 + index as u64;
         session
             .send(json!({
@@ -1880,7 +1880,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
             "five-host release elapsed={elapsed:?}"
         );
     }
-    for (index, (host, root)) in root_paths.iter().enumerate() {
+    for (index, (host, _root)) in root_paths.iter().enumerate() {
         let id = 100 + index as u64;
         let result = &responses[&id]["result"];
         assert_eq!(result["isError"], Value::Null, "host={host}: {result}");
