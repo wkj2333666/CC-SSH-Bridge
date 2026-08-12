@@ -164,7 +164,15 @@ Every MCP filesystem path and `remote_run.cwd` is required and absolute. The bri
 
 `remote_run` accepts one command string plus `shell: bash|sh|login`; omitting `shell` means Bash. Prefer POSIX syntax and request `sh` explicitly when Bash is unavailable. A Bash request fails closed instead of silently changing command meaning. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, warnings, exit status, truncation, and process-continuation uncertainty.
 
-Operational requests are multiplexed over one persistent SSH session per alias and can run concurrently up to configured capacity. Each request has an independent process group and cancellation; mutations are not implicitly serialized, so concurrent same-path calls have no ordering guarantee. If cancellation cannot be confirmed, the session is closed and the result is explicitly marked unknown rather than retried.
+Writes and patches use a bounded per-process in-memory write-back cache.
+Complete cached reads and consecutive edits are local-memory operations after
+the first guarded snapshot. Dirty edits synchronize within 30 seconds, after
+16 KiB of edit payload, before commands and filesystem-wide observations, or
+on clean MCP shutdown. An SSH interruption or abnormal bridge exit can lose an
+unsynchronized edit; a failed synchronization prevents its barrier operation
+from starting.
+
+Operational requests are multiplexed over one persistent SSH session per alias without bridge-defined host or concurrency admission limits. Each request has an independent process group and cancellation. Buffered edits and filesystem barriers coordinate same-host visibility, but otherwise concurrent calls have no general ordering guarantee. If cancellation cannot be confirmed, the result reports that the remote process may continue rather than retrying it.
 
 ## Human direct CLI
 

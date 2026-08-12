@@ -310,3 +310,23 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
         );
     }
 }
+
+#[test]
+fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
+    for required in [
+        "bounded in-memory edit cache",
+        "within 30 seconds",
+        "16 kib",
+        "clean mcp shutdown",
+        "buffered write may fail",
+        "do not manage generations",
+        "do not",
+        "manual flush",
+    ] {
+        assert!(
+            skill.contains(required),
+            "Skill omits buffered-edit boundary phrase {required:?}"
+        );
+    }
+}

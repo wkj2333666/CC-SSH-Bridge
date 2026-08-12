@@ -50,24 +50,38 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_write` | `host`, absolute `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
 
-`remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits because it snapshots every base before the first mutation and reports confirmed, unchanged, and outcome-unknown paths.
+`remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits.
+
+Successful writes and patches may remain briefly in the bridge's bounded
+in-memory edit cache. Complete reads and later edits observe the newest cached
+generation. Synchronization occurs within 30 seconds, at 16 KiB of edit
+payload, before `remote_run`, `remote_stat`, `remote_list`, or `remote_search`,
+and once on clean MCP shutdown. This is bridge-owned; do not track generations
+or invent a flush call. If SSH disconnects or the bridge exits abnormally,
+buffered writes may fail. A synchronization failure prevents the following
+barrier operation from starting.
 
 Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers use absolute remote paths, with `/dev/null` denoting create or delete. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
 
 ## Shell behavior
 
-`remote_run.command` is a shell command string. The bridge safely binds it through OpenSSH; do not wrap it in another `ssh` or add `bash -c`. Shell syntax inside the string still follows the selected remote shell.
+`remote_run.command` is a shell command string. The bridge safely binds it through the persistent session; do not wrap it in another `ssh` or add `bash -c`. Shell syntax inside the string still follows the selected remote shell.
 
-- `auto`: use Bash when available, otherwise fall back to POSIX sh.
-- `bash`: require Bash; fail before the command if unavailable.
-- `sh`: explicitly use POSIX sh.
+- omitted or `bash`: require Bash; fail before the command if unavailable.
+- `sh`: explicitly use POSIX sh; this is the model-visible fallback after a Bash capability error.
 - `login`: use the remote account's login shell.
 
-Prefer POSIX syntax. Request Bash for arrays, `[[ ... ]]`, `source`, `pipefail`, or Bash substitutions. Always inspect result `shell.kind`, `shell.fallback`, and `warnings`; a fallback is intentionally visible to the Agent.
+There is no `auto` value and the bridge never silently changes Bash into sh. A missing-Bash error reports the requested and available shells without prescribing a retry. The remote dispatcher itself is POSIX sh and is separate from the user shell; it never interprets the command payload as dispatcher code.
 
-Timeout and cancellation terminate the local SSH process group, but a detached or ambiguous remote process can remain. Check `remote_process_may_continue` before retrying.
+Use the Bash default normally. Select `sh` only for a POSIX-compatible command; its result includes a syntax warning. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
-Requests are independent and concurrent up to global and per-host limits. There is no mutation lock or ordering guarantee for simultaneous writes to the same path. Timeout and cancellation first send a request-level cancel; if the dispatcher does not confirm exit within the grace period, the bridge terminates the session and reports `remote_process_may_continue: true`. Never retry a mutation with an unknown outcome.
+Requests are multiplexed over each host session. The bridge has no host count,
+task window, global concurrency, or per-host concurrency limit. Same-host edit
+preparation and barrier operations are coordinated, but there is no general
+ordering guarantee for otherwise simultaneous calls. Atomic replace and
+expected-hash checks remain the protection against conflicting remote bases.
+
+Timeout and cancellation send a request-level `CANCEL`. If the dispatcher does not produce an exit result within the grace period, that request reports `remote_process_may_continue: true`; unrelated request IDs remain usable. Never retry a mutation with unknown outcome.
 
 ## Retained output
 
