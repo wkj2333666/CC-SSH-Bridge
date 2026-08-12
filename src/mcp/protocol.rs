@@ -189,6 +189,8 @@ impl CallToolResult {
 }
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = CallToolResult> + Send + 'static>>;
+pub type ShutdownFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), crate::BridgeError>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WireBudget {
@@ -206,6 +208,10 @@ pub trait ToolService: Send + Sync + 'static {
     fn definitions(&self) -> &[ToolDefinition];
 
     fn call(&self, name: String, arguments: Value, context: ToolCallContext) -> ToolFuture;
+
+    fn shutdown(&self) -> ShutdownFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub fn result_response(id: RequestId, result: Value) -> Value {

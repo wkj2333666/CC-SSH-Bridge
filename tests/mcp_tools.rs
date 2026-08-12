@@ -609,6 +609,32 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
 }
 
 #[tokio::test]
+async fn clean_mcp_shutdown_flushes_a_buffered_write() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let (_runtime, _log, tools) = fake_remote_tools_fixture(remote.path());
+    let mut session = ProtocolSession::start(tools).await;
+    let target = remote.path().join("shutdown-flush.txt");
+
+    let written = session
+        .call(
+            "remote_write",
+            json!({
+                "host":"dev",
+                "path":target,
+                "content":"FLUSH_ON_CLOSE\n",
+                "encoding":"utf8",
+                "mode":{"kind":"create"}
+            }),
+        )
+        .await;
+    assert_eq!(written["structuredContent"]["status"], "applied");
+    assert!(!target.exists());
+
+    session.close().await;
+    assert_eq!(std::fs::read(target).unwrap(), b"FLUSH_ON_CLOSE\n");
+}
+
+#[tokio::test]
 async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
     let remote = tempfile::TempDir::new().unwrap();
     let extra = [
