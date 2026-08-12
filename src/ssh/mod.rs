@@ -4,17 +4,14 @@
 )]
 
 mod argv;
-#[allow(
-    dead_code,
-    reason = "migration batch 2B stages the dispatcher before the 2C HostSession consumer"
-)]
 mod dispatcher;
-#[allow(
-    dead_code,
-    reason = "migration batches 2A and 2B stage framing before the 2C HostSession consumer"
-)]
 mod frame;
 mod process;
+#[allow(
+    dead_code,
+    reason = "migration batch 2C stages HostSession before the 2D high-level routing consumer"
+)]
+mod session;
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fmt::Write as _;
@@ -36,6 +33,11 @@ pub(crate) use process::{
     render_fixed_command,
 };
 pub use process::{RunRequest, RunResult, SshRunner};
+#[allow(
+    unused_imports,
+    reason = "migration batch 2C stages HostSession exports before the 2D routing consumer"
+)]
+pub(crate) use session::{HostSession, SessionRequest, SessionResult};
 
 const RUNTIME_DIRECTORY: &str = "cc-ssh-bridge";
 const CONTROL_FILENAME_BYTES: usize = 3 + 32;
