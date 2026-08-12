@@ -1674,6 +1674,24 @@ async fn wait_for_log_marker(path: &std::path::Path, marker: &str) {
     .expect("fake SSH marker");
 }
 
+async fn wait_for_log_marker_count(path: &std::path::Path, marker: &str, expected: usize) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let count = fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| *line == marker)
+                .count();
+            if count >= expected {
+                return;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fake SSH marker count");
+}
+
 async fn wait_for_file(path: &std::path::Path) {
     timeout(Duration::from_secs(2), async {
         while !path.exists() {
@@ -3125,7 +3143,7 @@ async fn concurrent_cancellation_reports_the_started_remote_process() {
                 .await
         })
     };
-    sleep(Duration::from_millis(20)).await;
+    wait_for_log_marker_count(&log, "C", 2).await;
     second_cancel.cancel();
     let error = second.await.unwrap().unwrap_err();
     assert_eq!(error.code, ErrorCode::Cancelled);
