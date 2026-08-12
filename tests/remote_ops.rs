@@ -218,6 +218,10 @@ fn fixture_with_options(
             OsString::from("local-fixed"),
         ),
         (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
+        (
+            OsString::from("FAKE_SSH_CANDIDATE_ROOT"),
+            OsString::from(format!(".{}", root.display())),
+        ),
     ]);
     for (key, value) in extra {
         environment.insert(OsString::from(key), value.clone());
@@ -6846,7 +6850,7 @@ async fn hosts_are_local_and_list_and_read_bounds_are_exact() {
                 host: "dev".into(),
                 path: None,
                 depth: None,
-                include_hidden: Some(true),
+                include_hidden: None,
                 max_entries: Some(1),
             },
             CancellationToken::new(),
@@ -8009,13 +8013,10 @@ async fn list_from_configured_filesystem_root_uses_single_separator() {
 
 #[tokio::test]
 async fn search_from_configured_filesystem_root_derives_relative_paths() {
-    let remote = tempfile::Builder::new()
-        .prefix("cc-ssh-bridge-search-root-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let remote = tempfile::TempDir::new().unwrap();
     let file = remote.path().join("a");
     std::fs::write(&file, b"needle\n").unwrap();
-    let (_runtime, _runner, bridge) = fixture(std::path::Path::new("/"), false);
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
     let result = bridge
         .search(
             SearchRequest {
@@ -8032,10 +8033,7 @@ async fn search_from_configured_filesystem_root_derives_relative_paths() {
         .unwrap();
     assert_eq!(result.matches.len(), 1);
     assert_eq!(result.matches[0].actual_path.value, file.to_str().unwrap());
-    assert_eq!(
-        result.matches[0].relative_path.value,
-        file.strip_prefix("/").unwrap().to_str().unwrap()
-    );
+    assert_eq!(result.matches[0].relative_path.value, "a");
 }
 
 #[tokio::test]

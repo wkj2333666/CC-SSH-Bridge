@@ -491,7 +491,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let listed = session
         .call(
             "remote_list",
-            json!({"host":"dev","path":remote.path(),"include_hidden":true,"max_entries":32}),
+            json!({"host":"dev","path":remote.path(),"max_entries":32}),
         )
         .await;
     assert_remote_context(&listed, remote.path());
@@ -1205,7 +1205,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let listed = call_json(
         &tools,
         "remote_list",
-        json!({"host":"dev", "path":remote.path(), "include_hidden":true, "max_entries":32}),
+        json!({"host":"dev", "path":remote.path(), "max_entries":32}),
     )
     .await;
     assert_eq!(
@@ -2317,7 +2317,7 @@ fn retention_models_fixture(
     (
         runtime_base,
         RemoteMcpTools::new(bridge),
-        json!({"host":"dev","path":&root,"include_hidden":true,"max_entries":1_000}),
+        json!({"host":"dev","path":&root,"max_entries":1_000}),
         json!({"host":"dev","paths":stat_paths}),
         json!({
             "host":"dev","query":"needle","path":search_root,"max_results":500
