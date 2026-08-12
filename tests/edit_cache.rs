@@ -104,13 +104,11 @@ impl EditBackend for FakeBackend {
                     };
                 };
             }
-            if let Some(outcome) = self.outcomes.lock().unwrap().pop_front() {
-                if let Err(error) = outcome {
-                    return CommitBatchOutcome {
-                        successes: Vec::new(),
-                        error: Some(error),
-                    };
-                }
+            if let Some(Err(error)) = self.outcomes.lock().unwrap().pop_front() {
+                return CommitBatchOutcome {
+                    successes: Vec::new(),
+                    error: Some(error),
+                };
             }
             let partial_failure = self.partial_failures.lock().unwrap().pop_front();
             let successful_items = partial_failure
