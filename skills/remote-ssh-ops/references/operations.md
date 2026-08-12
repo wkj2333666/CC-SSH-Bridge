@@ -30,7 +30,9 @@ ssh devbox
 
 Add future servers to OpenSSH config the same way. The bridge accepts concrete aliases and stores no host policy or credentials. The default version-2 bridge config is `~/.config/cc-ssh-bridge/config.toml` and contains only global operational limits; set `CC_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
 
-The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. MCP paths and command working directories are explicit absolute paths; remote filesystem retargeting follows ordinary server semantics.
+The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. On supported Linux targets a verified helper file persists under the remote account for reuse; its process and the POSIX dispatcher remain session-scoped. Claude Code and its credentials remain local. MCP paths and command working directories are explicit absolute paths; remote filesystem retargeting follows ordinary server semantics.
+The dispatcher applies the framed cwd, shell, and timeout itself, so a warm
+`remote_run` does not add a second shell or GNU `timeout` wrapper.
 
 ## MCP tool shapes
 

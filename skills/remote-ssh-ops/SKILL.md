@@ -13,7 +13,10 @@ Use only configured aliases returned by `remote_hosts`. Never construct raw SSH 
 
 Every MCP path is an explicit absolute remote path. Never infer it from the SSH home directory, a configured profile root, a previous call, or the current task.
 
-The bridge keeps one locally owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities; warm requests send one framed command with no per-request `ssh -G`, root observation, or physical-root guard. No Claude Code or helper is installed on the server. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
+The bridge keeps one locally owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/cc-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
+The selected dispatcher applies the absolute cwd, requested shell, and timeout
+directly; the bridge does not insert an additional `sh` or GNU `timeout`
+wrapper around Claude Code's command.
 
 ## Default workflow
 

@@ -1609,14 +1609,12 @@ async fn task78_run_cwd_is_encoded_as_data_and_never_executed() {
         .await
         .unwrap();
     let rendered = String::from_utf8(preview_bytes(&result.output.stdout)).unwrap();
-    assert!(rendered.contains("cc-ssh-bridge-run"), "{rendered}");
+    assert_eq!(rendered, "printf safe");
     assert!(!sentinel.exists());
 }
 
 #[tokio::test]
-async fn task78_run_rejects_quote_expansion_over_frame_before_command_child() {
-    let log_dir = TempDir::new().unwrap();
-    let log = log_dir.path().join("calls.log");
+async fn task78_run_command_is_sent_as_bounded_data_without_quote_expansion() {
     let limits = Limits {
         max_frame_bytes: 4_096,
         ..Limits::default()
@@ -1625,30 +1623,19 @@ async fn task78_run_rejects_quote_expansion_over_frame_before_command_child() {
         &["dev"],
         limits,
         Duration::from_secs(600),
-        &[
-            ("FAKE_SSH_MODE", "echo-command".to_owned()),
-            ("FAKE_SSH_LOG", log.display().to_string()),
-        ],
+        &[("FAKE_SSH_MODE", "echo-command".to_owned())],
     );
     for shell in [ShellRequest::Sh, ShellRequest::Login] {
         let mut run = request("dev", shell, Duration::from_secs(2));
         run.command = "'".repeat(800);
-        assert!(run.command.len() < 4_096);
-        let error = fixture
+        let expected = run.command.clone();
+        let result = fixture
             .runner
             .execute(run, CancellationToken::new())
             .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::RequestTooLarge);
+            .unwrap();
+        assert_eq!(preview_bytes(&result.output.stdout), expected.as_bytes());
     }
-    assert_eq!(
-        fs::read_to_string(log)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| *line == "C")
-            .count(),
-        0
-    );
 }
 
 fn preview_bytes(preview: &cc_ssh_bridge::output::OutputPreview) -> Vec<u8> {
@@ -2000,7 +1987,7 @@ async fn command_stdin_is_streamed_and_oversized_input_is_rejected_before_ssh() 
 }
 
 #[tokio::test]
-async fn selected_shell_and_remote_gnu_timeout_are_reported_and_rendered_exactly() {
+async fn selected_shell_is_reported_and_command_is_not_rewrapped() {
     let fixture = task3_runner(
         &["dev"],
         Limits::default(),
@@ -2024,12 +2011,7 @@ async fn selected_shell_and_remote_gnu_timeout_are_reported_and_rendered_exactly
     assert!(result.shell.fallback);
     assert!(!result.remote_process_may_continue);
     let rendered = String::from_utf8(preview_bytes(&result.output.stdout)).unwrap();
-    assert!(rendered.contains("[ \"$#\" -eq 3 ]"));
-    assert!(rendered.contains("cd -P -- \"$1\" || exit 126"));
-    assert!(rendered.contains("timeout --signal=TERM --kill-after=1s"));
-    assert!(rendered.contains("exec sh -c \"$2\""));
-    assert!(rendered.contains("printf safe"));
-    assert!(rendered.contains("'./srv/project'"));
+    assert_eq!(rendered, "printf safe");
 }
 
 #[test]
@@ -2067,7 +2049,7 @@ fn capability_probe_functionally_rejects_an_incompatible_timeout() {
 }
 
 #[tokio::test]
-async fn login_shell_is_raw_and_never_remote_timeout_wrapped() {
+async fn login_shell_is_selected_without_rewrapping_the_command() {
     let fixture = task3_runner(
         &["dev"],
         Limits::default(),
@@ -2087,12 +2069,7 @@ async fn login_shell_is_raw_and_never_remote_timeout_wrapped() {
         .unwrap();
     assert_eq!(result.shell.shell, ShellKind::Login);
     let rendered = String::from_utf8(preview_bytes(&result.output.stdout)).unwrap();
-    assert!(rendered.starts_with("exec sh -c "));
-    assert!(rendered.contains("cc-ssh-bridge-op"));
-    assert!(rendered.contains("exec \"$login_shell\" -c \"$payload\""));
-    assert!(rendered.contains(" '/bin/sh' 'printf safe'"));
-    assert!(!rendered.contains("eval \"$payload\""));
-    assert!(!rendered.contains("timeout --signal"));
+    assert_eq!(rendered, "printf safe");
 }
 
 #[tokio::test]
@@ -2412,7 +2389,7 @@ async fn missing_requested_shell_is_a_capability_error() {
 }
 
 #[tokio::test]
-async fn local_deadline_and_gnu_timeout_status_are_command_timeouts() {
+async fn session_watchdog_timeout_and_user_exit_124_remain_distinct() {
     let local = task3_runner(
         &["dev"],
         Limits::default(),

@@ -36,6 +36,7 @@ pub(crate) struct SessionRequest {
     pub(crate) env: std::collections::BTreeMap<String, Option<String>>,
     pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) timeout: Duration,
+    pub(crate) response_timeout: Duration,
     pub(crate) stdout_limit: u64,
     pub(crate) stderr_limit: u64,
 }
@@ -452,7 +453,7 @@ impl HostSession {
             return Err(error);
         }
 
-        let deadline = tokio::time::sleep(request.timeout);
+        let deadline = tokio::time::sleep(request.response_timeout);
         tokio::pin!(deadline);
         tokio::select! {
             biased;
@@ -1075,6 +1076,7 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             timeout,
+            response_timeout: timeout,
             stdout_limit: 1024,
             stderr_limit: 1024,
         }

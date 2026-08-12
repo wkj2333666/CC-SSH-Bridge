@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cc_ssh_bridge::ErrorCode;
 use cc_ssh_bridge::capability::ShellRequest;
 use cc_ssh_bridge::output::OutputStore;
 use cc_ssh_bridge::ssh::{RunRequest, RuntimePaths, SshRunner};
@@ -243,6 +244,35 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
     assert_eq!(
         String::from_utf8_lossy(&first.output.stdout.head),
         "helper-first"
+    );
+
+    let mut timed_request = request("sleep 30");
+    timed_request.timeout = Duration::from_millis(80);
+    let timed_out = runner
+        .execute(timed_request, CancellationToken::new())
+        .await
+        .expect_err("the persistent helper must report its watchdog timeout");
+    assert_eq!(timed_out.code, ErrorCode::CommandTimeout);
+    assert_eq!(
+        timed_out.details.remote_process_may_continue,
+        Some(false),
+        "{timed_out:?}"
+    );
+
+    let after_timeout = runner
+        .execute(
+            request("printf persistent-after-timeout"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a timed-out request must not poison the shared session");
+    assert_eq!(
+        String::from_utf8_lossy(&after_timeout.output.stdout.head),
+        "persistent-after-timeout"
+    );
+    assert_eq!(
+        after_timeout.helper_mode,
+        cc_ssh_bridge::ssh::HelperMode::Persistent
     );
     assert_eq!(fs::read_to_string(&install_log).unwrap(), "NEED\n");
     let uploaded = fs::read_to_string(&bytes_log)
