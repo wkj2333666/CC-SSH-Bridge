@@ -1742,4 +1742,46 @@ mod tests {
             false
         );
     }
+
+    #[tokio::test]
+    async fn retained_success_pages_are_the_original_model_presentation() {
+        let (_runtime, bridge) = bridge_fixture();
+        let hosts = (0..8_000)
+            .map(|index| HostInfo {
+                host: format!("host-{index:05}"),
+            })
+            .collect::<Vec<_>>();
+        let expected = serde_json::to_string(&HostsPresentation {
+            remote: true,
+            hosts: hosts.clone(),
+        })
+        .unwrap();
+        let rendered = result_value(
+            super::hosts(
+                Arc::clone(&bridge),
+                Ok(HostsResult { hosts }),
+                compact_budget(),
+                CancellationToken::new(),
+            )
+            .await,
+        );
+        let output_ref = rendered["structuredContent"]["output_ref"]
+            .as_str()
+            .expect("large presentation must be retained");
+        let page = bridge
+            .output_read(
+                crate::remote::OutputReadRequest {
+                    output_ref: output_ref.to_owned(),
+                    stream: StreamKind::Stdout,
+                    offset: 0,
+                    max_bytes: expected.len(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retained presentation must be readable");
+        assert_eq!(page.data.encoding, ValueEncoding::Utf8);
+        assert_eq!(page.data.value, expected);
+        assert!(page.eof);
+    }
 }
