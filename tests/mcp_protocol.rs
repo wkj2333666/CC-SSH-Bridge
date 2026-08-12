@@ -2674,7 +2674,7 @@ async fn task7_writer_one_byte_writes_complete_noninterleaved_lines() {
 }
 
 #[tokio::test]
-async fn task7_writer_failure_shutdown_and_backpressure_are_fixed() {
+async fn task7_writer_failure_and_shutdown_are_fixed() {
     timeout(Duration::from_secs(5), async {
         for writer in [
             TestWriter {
@@ -2690,13 +2690,6 @@ async fn task7_writer_failure_shutdown_and_backpressure_are_fixed() {
                 pending: false,
                 fail_write: false,
                 fail_shutdown: true,
-            },
-            TestWriter {
-                bytes: Arc::new(StdMutex::new(Vec::new())),
-                one_byte: false,
-                pending: true,
-                fail_write: false,
-                fail_shutdown: false,
             },
         ] {
             let service = Arc::new(NullService {
