@@ -233,7 +233,7 @@ impl SshRunner {
             .checked_add(request.timeout)
             .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?;
         let session = self
-            .session_for_host(&policy, &request.host, limits, &cancel)
+            .session_for_host(&policy, &request.host, limits, &capability, &cancel)
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
@@ -376,6 +376,7 @@ impl SshRunner {
         policy: &SshPolicy,
         host: &str,
         limits: EffectiveLimits,
+        capability: &Capability,
         cancel: &CancellationToken,
     ) -> BridgeResult<Arc<HostSession>> {
         if let Some(session) = self.sessions.lock().await.get(host).cloned() {
@@ -400,12 +401,13 @@ impl SshRunner {
             self.sessions.lock().await.remove(host);
         }
         let session = Arc::new(
-            HostSession::connect_with(
+            HostSession::connect_with_capability(
                 policy.clone(),
                 host.to_owned(),
                 limits,
                 self.executable.clone().into_os_string(),
                 self.environment.clone(),
+                capability,
                 cancel.clone(),
             )
             .await?,
@@ -655,7 +657,7 @@ impl SshRunner {
             .checked_add(request.timeout)
             .ok_or_else(|| BridgeError::invalid_argument("fixed command timeout is too large"))?;
         let session = self
-            .session_for_host(&policy, &request.host, limits, &cancel)
+            .session_for_host(&policy, &request.host, limits, &capability, &cancel)
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
