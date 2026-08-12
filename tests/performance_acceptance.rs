@@ -96,10 +96,7 @@ fn fake_fixture(hosts: &[&str], environment: &[(&str, OsString)]) -> FakeFixture
     }
 }
 
-fn edit_cache_fixture(
-    flush_delay_ms: u64,
-    flush_threshold_bytes: usize,
-) -> FakeFixture {
+fn edit_cache_fixture(flush_delay_ms: u64, flush_threshold_bytes: usize) -> FakeFixture {
     let runtime_base = TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());

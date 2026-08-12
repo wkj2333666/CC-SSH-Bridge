@@ -190,13 +190,30 @@ jobs:
             -- --nocapture 2>&1 | tee diagnostics/rss-edit-cache.log
 
       - name: Run required real SSH edit-cache integration
+        shell: bash
         env:
           CC_SSH_BRIDGE_REQUIRE_REAL_SSH: "1"
         run: |
+          set +e
+          set -o pipefail
           cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
             --test real_ssh \
             real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellation \
-            -- --nocapture
+            -- --nocapture 2>&1 | tee diagnostics/real-ssh.log
+          test_status=${PIPESTATUS[0]}
+          if (( test_status != 0 )); then
+            tail -n 160 diagnostics/real-ssh.log \
+              | grep -E '^(test .* FAILED|---- .* stdout ----|thread .* panicked at|assertion .* failed|[[:space:]]+(left|right|note):|failures:|[[:space:]]+[[:alnum:]_]+(::[[:alnum:]_]+)+|test result: FAILED|error: test failed)' \
+              | while IFS= read -r detail; do
+              if [[ -n "$detail" ]]; then
+                detail="${detail//'%'/'%25'}"
+                detail="${detail//$'\r'/'%0D'}"
+                detail="${detail//$'\n'/'%0A'}"
+                echo "::error file=tests/real_ssh.rs,title=Required real SSH output::$detail"
+              fi
+            done
+          fi
+          exit "$test_status"
 
       - name: Upload diagnostic evidence
         if: always()
