@@ -54,12 +54,14 @@ jobs:
             2>&1 | tee test-output.log
           test_status=${PIPESTATUS[0]}
           if (( test_status != 0 )); then
-            details="$(tail -n 120 test-output.log)"
-            details="${details:0:12000}"
-            details="${details//'%'/'%25'}"
-            details="${details//$'\r'/'%0D'}"
-            details="${details//$'\n'/'%0A'}"
-            echo "::error title=Rust test failure::$details"
+            tail -n 160 test-output.log \
+              | grep -E '^(test .* FAILED|---- .* stdout ----|thread .* panicked at|assertion .* failed|[[:space:]]+(left|right|note):|failures:|[[:space:]]+[[:alnum:]_]+(::[[:alnum:]_]+)+|test result: FAILED|error: test failed)' \
+              | while IFS= read -r detail; do
+                  detail="${detail//'%'/'%25'}"
+                  detail="${detail//$'\r'/'%0D'}"
+                  detail="${detail//$'\n'/'%0A'}"
+                  echo "::error title=Rust test output::$detail"
+                done
           fi
           exit "$test_status"
 
