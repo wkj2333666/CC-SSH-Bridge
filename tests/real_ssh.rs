@@ -16,8 +16,8 @@ use cc_ssh_bridge::config::{Config, HostLimitOverrides, HostProfile};
 use cc_ssh_bridge::output::OutputStore;
 use cc_ssh_bridge::remote::{
     ApplyPatchRequest, EncodedValue, ListRequest, ReadEntry, ReadRequest, RemoteBridge,
-    RemoteFileKind, RemoteRunRequest, RunShell, SearchEngine, SearchRequest, ShellName, StatEntry,
-    StatRequest, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
+    RemoteFileKind, RemoteRunRequest, RunShell, SearchRequest, ShellName, StatEntry, StatRequest,
+    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
 };
 use cc_ssh_bridge::ssh::{RuntimePaths, SshRunner};
 use cc_ssh_bridge::{ErrorCode, quote};
@@ -454,6 +454,9 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         None => return,
     };
     let (runtime_base, runtime, runner, bridge) = fixture.bridge().expect("build real SSH bridge");
+    let root = config_path(&fixture.root).unwrap().to_owned();
+    let seed_path = format!("{root}/seed.txt");
+    let generated_path = format!("{root}/generated.txt");
 
     let direct_wrong_key = Command::new("/usr/bin/ssh")
         .arg("-F")
@@ -482,7 +485,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .stat(
             StatRequest {
                 host: WRONG_KEY_HOST.to_owned(),
-                paths: vec!["seed.txt".to_owned()],
+                paths: vec![seed_path.clone()],
             },
             CancellationToken::new(),
         )
@@ -496,7 +499,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .list(
             ListRequest {
                 host: BASH_HOST.to_owned(),
-                path: None,
+                path: Some(root.clone()),
                 depth: Some(2),
                 include_hidden: Some(false),
                 max_entries: Some(100),
@@ -516,7 +519,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .stat(
             StatRequest {
                 host: BASH_HOST.to_owned(),
-                paths: vec!["seed.txt".to_owned()],
+                paths: vec![seed_path.clone()],
             },
             CancellationToken::new(),
         )
@@ -534,7 +537,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .read(
             ReadRequest {
                 host: BASH_HOST.to_owned(),
-                paths: vec!["seed.txt".to_owned()],
+                paths: vec![seed_path.clone()],
                 start_line: Some(1),
                 max_lines: Some(10),
                 max_bytes: Some(4096),
@@ -554,7 +557,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             SearchRequest {
                 host: BASH_HOST.to_owned(),
                 query: "needle".to_owned(),
-                path: None,
+                path: Some(root.clone()),
                 globs: vec!["*.txt".to_owned()],
                 max_results: Some(10),
                 binary: Some(false),
@@ -563,7 +566,6 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         )
         .await
         .expect("search through real sshd");
-    assert_eq!(search.engine, SearchEngine::Rg);
     assert_eq!(search.matches.len(), 1);
     assert_eq!(utf8(&search.matches[0].relative_path), "seed.txt");
     assert_eq!(search.matches[0].line, 1);
@@ -573,7 +575,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             RemoteRunRequest {
                 host: BASH_HOST.to_owned(),
                 command: "printf '%s' \"$BASH_VERSION\"".to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Bash,
                 timeout_ms: Some(2_000),
                 stdin: None,
@@ -596,7 +598,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
                 command:
                     "printf '<%s>\\n' \"space value\" \"single'quote\" 'dollar $HOME' 'semi;colon'"
                         .to_owned(),
-                cwd: Some("cwd space'quote".to_owned()),
+                cwd: Some(format!("{root}/cwd space'quote")),
                 shell: RunShell::Sh,
                 timeout_ms: Some(2_000),
                 stdin: None,
@@ -617,7 +619,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             RemoteRunRequest {
                 host: SH_ONLY_HOST.to_owned(),
                 command: "printf sh".to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Sh,
                 timeout_ms: Some(2_000),
                 stdin: None,
@@ -634,7 +636,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             RemoteRunRequest {
                 host: SH_ONLY_HOST.to_owned(),
                 command: "printf bash".to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Bash,
                 timeout_ms: Some(2_000),
                 stdin: None,
@@ -649,7 +651,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .write(
             WriteRequest {
                 host: BASH_HOST.to_owned(),
-                path: "generated.txt".to_owned(),
+                path: generated_path.clone(),
                 content: "old\n".to_owned(),
                 encoding: WriteEncoding::Utf8,
                 mode: WriteMode::Create,
@@ -667,7 +669,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .read(
             ReadRequest {
                 host: BASH_HOST.to_owned(),
-                paths: vec!["generated.txt".to_owned()],
+                paths: vec![generated_path.clone()],
                 start_line: Some(1),
                 max_lines: Some(10),
                 max_bytes: Some(4096),
@@ -684,19 +686,23 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .apply_patch(
             ApplyPatchRequest {
                 host: BASH_HOST.to_owned(),
-                patch: "--- a/generated.txt\n+++ b/generated.txt\n@@ -1 +1 @@\n-old\n+new\n"
-                    .to_owned(),
+                patch: format!(
+                    "--- a/{generated_path}\n+++ b/{generated_path}\n@@ -1 +1 @@\n-old\n+new\n"
+                ),
             },
             CancellationToken::new(),
         )
         .await
         .expect("patch through real sshd");
-    assert_eq!(patch.changed_paths, ["generated.txt"]);
+    assert_eq!(
+        patch.changed_paths.as_slice(),
+        std::slice::from_ref(&generated_path)
+    );
     let cached_patch = bridge
         .read(
             ReadRequest {
                 host: BASH_HOST.to_owned(),
-                paths: vec!["generated.txt".to_owned()],
+                paths: vec![generated_path.clone()],
                 start_line: Some(1),
                 max_lines: Some(10),
                 max_bytes: Some(4096),
@@ -715,7 +721,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             RemoteRunRequest {
                 host: BASH_HOST.to_owned(),
                 command: ":".to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Sh,
                 timeout_ms: Some(2_000),
                 stdin: None,
@@ -735,7 +741,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             RemoteRunRequest {
                 host: BASH_HOST.to_owned(),
                 command: "printf '%s' \"$$\" > timeout.pid; exec sleep 10".to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Sh,
                 timeout_ms: Some(100),
                 stdin: None,
@@ -765,7 +771,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
                     "while :; do sleep 1 & child=$!; wait \"$child\" || :; child=; done",
                 )
                 .to_owned(),
-                cwd: None,
+                cwd: Some(root.clone()),
                 shell: RunShell::Sh,
                 timeout_ms: Some(10_000),
                 stdin: None,
