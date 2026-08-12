@@ -56,7 +56,7 @@ Local `LC_ALL=C` is forced only for bridge protocol and SSH-diagnostic phases. R
 
 The dispatcher is always POSIX sh and never parses a user command as its own control language. Timeout or cancellation first sends a request-level cancel. If termination cannot be confirmed, the bridge closes the persistent session and reports pending mutation outcomes as unknown rather than retrying them.
 
-All command tools are treated as mutating. A local timeout sends TERM and then KILL to the entire local SSH process group. A detached or ambiguous remote child can survive, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
+All command tools are treated as mutating. A local timeout sends a request-level cancel, then terminates the entire persistent SSH process group when the dispatcher cannot confirm completion. A detached or ambiguous remote child can survive, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
 
 ## Files, output, and protocol limits
 
@@ -114,4 +114,4 @@ cargo test --release --test performance_acceptance -- --nocapture
 CC_SSH_BRIDGE_REQUIRE_REAL_SSH=1 cargo test --release --test real_ssh -- --nocapture
 ```
 
-Final acceptance also runs the predictable-temp symlink regression, 16 MiB stdout+stderr serialization case, oversized-frame recovery, SSHFS policy/race tests, CRLF OpenSSH diagnostic classification, and an isolated real-OpenSSH fixture. The recorded real fixture ran successfully without a skip.
+The `remote_ops` and `performance_acceptance` fixtures use the persistent dispatcher protocol, including request cancellation, bounded output, cleanup, and capability-mismatch cases. Final acceptance also runs the predictable-temp symlink regression, 16 MiB stdout+stderr serialization case, oversized-frame recovery, SSHFS policy/race tests, CRLF OpenSSH diagnostic classification, and an isolated real-OpenSSH fixture.

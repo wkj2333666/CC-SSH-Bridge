@@ -132,6 +132,7 @@ done
 case "$remote_command" in
     *cc-ssh-dispatcher-1*)
         log_call S "$@"
+        CC_SSH_BRIDGE_TEST_MODE=1 \
         CC_SSH_BRIDGE_TEST_CALL_LOG=${FAKE_SSH_LOG-} \
         CC_SSH_LOCAL_FIXED_PATH_ONCE=${FAKE_SSH_LOCAL_FIXED_PATH_ONCE-} \
         CC_SSH_LOCAL_FIXED_PATH_MARKER=${FAKE_SSH_LOCAL_FIXED_PATH_MARKER-} \
