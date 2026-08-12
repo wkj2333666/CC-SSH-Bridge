@@ -471,7 +471,8 @@ pub(crate) fn validate_secure_existing_ancestors(path: &Path) -> BridgeResult<()
             let trusted_tmp = resolved == Path::new("/tmp")
                 && metadata.uid() == root_uid
                 && metadata.mode() & 0o1000 != 0;
-            if metadata.mode() & 0o022 != 0 && !trusted_tmp
+            if metadata.mode() & 0o022 != 0
+                && !trusted_tmp
                 && !(below_private_user_ancestor && metadata.uid() == current_uid)
             {
                 return Err(BridgeError::invalid_config(
