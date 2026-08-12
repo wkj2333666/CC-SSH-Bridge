@@ -1591,8 +1591,8 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
                 "rejected value launched transport: {value:?}"
             );
         } else {
-            assert_eq!(result["structuredContent"]["exit_code"], 0, "{result}");
-            assert!(text_content(&result).contains("safe"), "{result}");
+            assert_eq!(result["structuredContent"]["exit_status"], 0, "{result}");
+            assert!(text_json(&result).to_string().contains("safe"), "{result}");
         }
         assert_hostile_marker_absent(remote.path());
     }
