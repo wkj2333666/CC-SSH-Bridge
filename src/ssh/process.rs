@@ -1506,6 +1506,10 @@ struct ChildSpec {
 }
 
 #[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "one-shot command phases remain for transport parity while initialization still uses resolve, probe, and observe"
+)]
 enum Phase {
     Resolve,
     Probe,
