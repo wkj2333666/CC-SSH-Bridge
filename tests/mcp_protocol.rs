@@ -1117,7 +1117,16 @@ async fn task7_lifecycle_complete_validation_and_zero_service_effect_matrix() {
             json!({"jsonrpc":"2.0","method":"unknown/notification","params":{}}),
             json!({"jsonrpc":"2.0","id":21,"method":"ping","params":{}}),
         ];
-        let (responses, result) = serve_frames(server, &frames).await;
+        let mut session = Session::start(server).await;
+        let mut responses = Vec::new();
+        for frame in frames {
+            let expects_response = frame.get("id").is_some();
+            session.send(&frame).await;
+            if expects_response {
+                responses.push(session.recv().await);
+            }
+        }
+        let result = session.close().await;
         assert!(result.is_ok(), "unexpected server result: {result:?}");
         assert_eq!(
             responses
@@ -2383,7 +2392,7 @@ async fn run_closing_matrix_case(source: ClosingSource, active_kind: ClosingActi
             .await
             .unwrap();
             writer_state.wait_until_blocked().await;
-            for id in 101..=109 {
+            for id in 101..=116 {
                 send_closing_frame(
                     &mut input,
                     json!({"jsonrpc":"2.0","id":id,"method":"ping","params":{}}),
@@ -2402,7 +2411,7 @@ async fn run_closing_matrix_case(source: ClosingSource, active_kind: ClosingActi
             } else {
                 let _ = send_closing_frame(
                     &mut input,
-                    json!({"jsonrpc":"2.0","id":110,"method":"ping","params":{}}),
+                    json!({"jsonrpc":"2.0","id":117,"method":"ping","params":{}}),
                 )
                 .await;
             }
