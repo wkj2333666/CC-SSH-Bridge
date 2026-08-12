@@ -6,9 +6,12 @@ use std::path::Path;
 use std::process::Command;
 
 use cc_ssh_bridge::config::{
-    Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS, Limits,
-    MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
-    discover_ssh_aliases_from, migrate_v1_file, migrate_v1_text,
+    Config, DEFAULT_EDIT_CACHE_MAX_BYTES, DEFAULT_EDIT_FLUSH_DELAY_MS,
+    DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES,
+    DEFAULT_RETENTION_SERIALIZATION_JOBS, Limits, MAX_EDIT_CACHE_MAX_BYTES,
+    MAX_EDIT_FLUSH_DELAY_MS, MAX_EDIT_FLUSH_THRESHOLD_BYTES, MAX_GLOBAL_SPOOL_QUOTA_BYTES,
+    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES, discover_ssh_aliases_from,
+    migrate_v1_file, migrate_v1_text,
 };
 use cc_ssh_bridge::error::{BridgeError, ErrorCode};
 use cc_ssh_bridge::path::RemotePath;
@@ -101,6 +104,18 @@ root = "/"
     assert_eq!(migrated.explicit_aliases, ["nkai", "weibo"]);
     assert_eq!(migrated.config.limits.command_timeout_ms, 300_000);
     assert_eq!(migrated.config.limits.retention_serialization_jobs, 2);
+    assert_eq!(
+        migrated.config.limits.edit_flush_delay_ms,
+        DEFAULT_EDIT_FLUSH_DELAY_MS
+    );
+    assert_eq!(
+        migrated.config.limits.edit_flush_threshold_bytes,
+        DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES
+    );
+    assert_eq!(
+        migrated.config.limits.edit_cache_max_bytes,
+        DEFAULT_EDIT_CACHE_MAX_BYTES
+    );
 }
 
 #[test]
@@ -415,6 +430,85 @@ fn config_defaults_match_compiled_limits() {
     assert_eq!(limits.max_write_bytes, MAX_WRITE_BYTES);
     assert_eq!(limits.preview_bytes, 256 * 1024);
     assert_eq!(limits.max_output_bytes, MAX_OUTPUT_BYTES);
+}
+
+#[test]
+fn edit_cache_config_defaults_are_frozen() {
+    let limits = Limits::default();
+    assert_eq!(limits.edit_flush_delay_ms, DEFAULT_EDIT_FLUSH_DELAY_MS);
+    assert_eq!(
+        limits.edit_flush_threshold_bytes,
+        DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES
+    );
+    assert_eq!(limits.edit_cache_max_bytes, DEFAULT_EDIT_CACHE_MAX_BYTES);
+    assert_eq!(DEFAULT_EDIT_FLUSH_DELAY_MS, 30_000);
+    assert_eq!(DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES, 16 * 1024);
+    assert_eq!(DEFAULT_EDIT_CACHE_MAX_BYTES, 16 * 1024 * 1024);
+}
+
+#[test]
+fn version_two_config_defaults_and_round_trips_edit_cache_limits() {
+    let defaults: Config = toml::from_str("version = 2\n").unwrap();
+    assert_eq!(
+        defaults.limits.edit_flush_delay_ms,
+        DEFAULT_EDIT_FLUSH_DELAY_MS
+    );
+    assert_eq!(
+        defaults.limits.edit_flush_threshold_bytes,
+        DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES
+    );
+    assert_eq!(
+        defaults.limits.edit_cache_max_bytes,
+        DEFAULT_EDIT_CACHE_MAX_BYTES
+    );
+
+    let configured: Config = toml::from_str(
+        r#"
+version = 2
+[limits]
+edit_flush_delay_ms = 12345
+edit_flush_threshold_bytes = 8192
+edit_cache_max_bytes = 2097152
+"#,
+    )
+    .unwrap();
+    assert_eq!(configured.limits.edit_flush_delay_ms, 12_345);
+    assert_eq!(configured.limits.edit_flush_threshold_bytes, 8 * 1024);
+    assert_eq!(configured.limits.edit_cache_max_bytes, 2 * 1024 * 1024);
+
+    let rendered = toml::to_string(&configured).unwrap();
+    let reparsed: Config = toml::from_str(&rendered).unwrap();
+    assert_eq!(reparsed, configured);
+}
+
+#[test]
+fn edit_cache_config_accepts_exact_upper_bounds() {
+    let file = write_config(&format!(
+        "version = 2\n[limits]\nedit_flush_delay_ms = {MAX_EDIT_FLUSH_DELAY_MS}\nedit_flush_threshold_bytes = {MAX_EDIT_FLUSH_THRESHOLD_BYTES}\nedit_cache_max_bytes = {MAX_EDIT_CACHE_MAX_BYTES}\n"
+    ));
+    assert!(Config::load(file.path()).is_ok());
+}
+
+#[test]
+fn edit_cache_config_rejects_zero_over_ceiling_and_threshold_over_cache() {
+    let cases = [
+        "edit_flush_delay_ms = 0".to_owned(),
+        format!("edit_flush_delay_ms = {}", MAX_EDIT_FLUSH_DELAY_MS + 1),
+        "edit_flush_threshold_bytes = 0".to_owned(),
+        format!(
+            "edit_flush_threshold_bytes = {}",
+            MAX_EDIT_FLUSH_THRESHOLD_BYTES + 1
+        ),
+        "edit_cache_max_bytes = 0".to_owned(),
+        format!("edit_cache_max_bytes = {}", MAX_EDIT_CACHE_MAX_BYTES + 1),
+        "edit_flush_threshold_bytes = 4194304\nedit_cache_max_bytes = 2097152".to_owned(),
+    ];
+
+    for limits in cases {
+        let file = write_config(&format!("version = 2\n[limits]\n{limits}\n"));
+        let error = Config::load(file.path()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{limits}");
+    }
 }
 
 #[test]
