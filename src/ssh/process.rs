@@ -196,14 +196,14 @@ impl SshRunner {
         let root = crate::REMOTE_OPERATION_ROOT.to_owned();
         let limits = self.config.limits();
         validate_request(&request, limits)?;
+        let setup_deadline = connect_deadline(limits.connect_timeout_ms);
 
         let initializer = self.initializer(&request.host).await;
-        let initialize_deadline = connect_deadline(limits.connect_timeout_ms);
         let initialize_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
-            () = tokio::time::sleep_until(initialize_deadline) => {
+            () = tokio::time::sleep_until(setup_deadline) => {
                 return Err(connect_wait_timeout(
                     &request.host,
                     "SSH host initialization wait timed out",
@@ -214,10 +214,9 @@ impl SshRunner {
             return Err(cancelled_error(false, 0));
         }
 
-        let initialize_timeout_ms =
-            remaining_connect_timeout_ms(initialize_deadline, &request.host)?;
+        let initialize_timeout_ms = remaining_connect_timeout_ms(setup_deadline, &request.host)?;
         let (policy, capability) = tokio::time::timeout_at(
-            initialize_deadline,
+            setup_deadline,
             self.initialize_host(&request.host, &root, initialize_timeout_ms, &cancel),
         )
         .await
@@ -236,7 +235,14 @@ impl SshRunner {
             error
         })?;
         let session = self
-            .session_for_host(&policy, &request.host, limits, &capability, &cancel)
+            .session_for_host(
+                &policy,
+                &request.host,
+                limits,
+                &capability,
+                setup_deadline,
+                &cancel,
+            )
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
@@ -293,7 +299,7 @@ impl SshRunner {
                     env: BTreeMap::new(),
                     stdin: request.stdin,
                     timeout: command_timeout,
-                    admission_timeout: Duration::from_millis(limits.connect_timeout_ms),
+                    admission_deadline: setup_deadline,
                     response_timeout,
                     stdout_limit: limits.max_output_bytes,
                     stderr_limit: limits.max_output_bytes,
@@ -398,6 +404,7 @@ impl SshRunner {
         host: &str,
         limits: EffectiveLimits,
         capability: &Capability,
+        setup_deadline: Instant,
         cancel: &CancellationToken,
     ) -> BridgeResult<Arc<HostSession>> {
         if let Some(session) = self.sessions.lock().await.get(host).cloned() {
@@ -414,12 +421,11 @@ impl SshRunner {
                     .or_insert_with(|| Arc::new(Mutex::new(()))),
             )
         };
-        let session_deadline = connect_deadline(limits.connect_timeout_ms);
         let _guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = connector.lock() => guard,
-            () = tokio::time::sleep_until(session_deadline) => {
+            () = tokio::time::sleep_until(setup_deadline) => {
                 return Err(connect_wait_timeout(
                     host,
                     "SSH session initializer wait timed out",
@@ -433,7 +439,7 @@ impl SshRunner {
             self.sessions.lock().await.remove(host);
         }
         let mut connect_limits = limits;
-        connect_limits.connect_timeout_ms = remaining_connect_timeout_ms(session_deadline, host)?;
+        connect_limits.connect_timeout_ms = remaining_connect_timeout_ms(setup_deadline, host)?;
         let session = Arc::new(
             HostSession::connect_with_capability(
                 policy.clone(),
@@ -634,6 +640,7 @@ impl SshRunner {
         self.config.require_discovered_alias(&request.host)?;
         let limits = self.config.limits();
         let root = crate::REMOTE_OPERATION_ROOT.to_owned();
+        let setup_deadline = connect_deadline(limits.connect_timeout_ms);
         if request.timeout.is_zero()
             || request.timeout > Duration::from_millis(limits.command_timeout_ms)
         {
@@ -679,22 +686,20 @@ impl SshRunner {
         }
 
         let initializer = self.initializer(&request.host).await;
-        let initialize_deadline = connect_deadline(limits.connect_timeout_ms);
         let initialize_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
-            () = tokio::time::sleep_until(initialize_deadline) => {
+            () = tokio::time::sleep_until(setup_deadline) => {
                 return Err(connect_wait_timeout(
                     &request.host,
                     "SSH host initialization wait timed out",
                 ));
             }
         };
-        let initialize_timeout_ms =
-            remaining_connect_timeout_ms(initialize_deadline, &request.host)?;
+        let initialize_timeout_ms = remaining_connect_timeout_ms(setup_deadline, &request.host)?;
         let (policy, capability) = tokio::time::timeout_at(
-            initialize_deadline,
+            setup_deadline,
             self.initialize_host(&request.host, &root, initialize_timeout_ms, &cancel),
         )
         .await
@@ -719,7 +724,14 @@ impl SshRunner {
             }
         }
         let session = self
-            .session_for_host(&policy, &request.host, limits, &capability, &cancel)
+            .session_for_host(
+                &policy,
+                &request.host,
+                limits,
+                &capability,
+                setup_deadline,
+                &cancel,
+            )
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
@@ -756,7 +768,7 @@ impl SshRunner {
                     env: BTreeMap::new(),
                     stdin: request.stdin,
                     timeout: command_timeout,
-                    admission_timeout: Duration::from_millis(limits.connect_timeout_ms),
+                    admission_deadline: setup_deadline,
                     response_timeout,
                     stdout_limit: request.stdout_limit,
                     stderr_limit: request.stderr_limit,
@@ -2125,7 +2137,7 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             timeout: Duration::from_secs(5),
-            admission_timeout: Duration::from_millis(25),
+            admission_deadline: Instant::now() + Duration::from_millis(25),
             response_timeout: Duration::from_secs(5),
             stdout_limit: 1024 * 1024,
             stderr_limit: 1024 * 1024,
@@ -2159,10 +2171,20 @@ mod tests {
     }
 
     fn task5_fixed_fixture(environment: &[(&str, String)]) -> Task5FixedFixture {
+        task5_fixed_fixture_with_limits(environment, crate::config::Limits::default())
+    }
+
+    fn task5_fixed_fixture_with_limits(
+        environment: &[(&str, String)],
+        limits: crate::config::Limits,
+    ) -> Task5FixedFixture {
         let base = tempfile::TempDir::new().unwrap();
         let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
         let output = Arc::new(OutputStore::new(&runtime).unwrap());
-        let mut config = Config::default();
+        let mut config = Config {
+            limits,
+            ..Config::default()
+        };
         config.hosts.insert(
             "dev".to_owned(),
             HostProfile {
@@ -2602,5 +2624,53 @@ mod tests {
         assert_eq!(error.details.mutation_may_have_applied, Some(true));
         assert!(task5_call_count(&setup_log, "C") <= 1);
         assert_eq!(task5_internal_spool_file_count(&fixture.runtime), 0);
+    }
+
+    #[tokio::test]
+    async fn fixed_setup_consumes_one_connect_budget_across_probe_and_session_start() {
+        let logs = tempfile::TempDir::new().unwrap();
+        let log = logs.path().join("fixed-connect-budget.log");
+        let limits = crate::config::Limits {
+            connect_timeout_ms: 300,
+            ..crate::config::Limits::default()
+        };
+        let fixture = task5_fixed_fixture_with_limits(
+            &[
+                ("FAKE_SSH_LOG", log.display().to_string()),
+                ("FAKE_SSH_PROBE_SLEEP_SECONDS", "0.2".to_owned()),
+                ("FAKE_SSH_SESSION_START_SLEEP_SECONDS", "0.2".to_owned()),
+            ],
+            limits,
+        );
+        let owner = InternalSpoolOwner::new();
+
+        let started = Instant::now();
+        let result = fixture
+            .runner
+            .execute_fixed_once(
+                task5_fixed_request(
+                    FixedOperationKind::ReadOnly,
+                    Duration::from_secs(2),
+                    owner.registration(),
+                    16,
+                    16,
+                ),
+                CancellationToken::new(),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("fixed setup unexpectedly received a fresh connect budget"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode::ConnectTimeout);
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "fixed setup exceeded one connect budget plus bounded cleanup: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(task5_call_count(&log, "P"), 1);
+        assert_eq!(task5_call_count(&log, "S"), 1);
+        assert_eq!(task5_call_count(&log, "C"), 0);
     }
 }
