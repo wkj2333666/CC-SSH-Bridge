@@ -1340,20 +1340,14 @@ impl SshRunner {
             return self.failed_exit(-1, output, phase, host, elapsed).await;
         };
         if code == 0 {
-            return Ok(ChildOutcome {
-                status: code,
-                output,
-            });
+            return Ok(ChildOutcome { output });
         }
         if matches!(phase, Phase::Command { .. })
             && code != 255
             && code != ROOT_GUARD_EXIT
             && !(phase.remote_timeout_wrapped() && code == 124)
         {
-            return Ok(ChildOutcome {
-                status: code,
-                output,
-            });
+            return Ok(ChildOutcome { output });
         }
         self.failed_exit(code, output, phase, host, elapsed).await
     }
@@ -1424,7 +1418,6 @@ struct OperationReservation {
 }
 
 struct ChildOutcome {
-    status: i32,
     output: ChildCaptured,
 }
 
@@ -1497,16 +1490,6 @@ impl ChildCaptured {
             Self::Internal(_) => Err(BridgeError::new(
                 ErrorCode::Io,
                 "internal capture used by public command",
-                false,
-            )),
-        }
-    }
-    fn into_internal(self) -> BridgeResult<InternalCapturedOutput> {
-        match self {
-            Self::Internal(output) => Ok(output),
-            Self::Public(_) => Err(BridgeError::new(
-                ErrorCode::Io,
-                "public capture used by fixed command",
                 false,
             )),
         }
