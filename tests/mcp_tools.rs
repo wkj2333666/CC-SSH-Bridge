@@ -681,6 +681,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
         run["structuredContent"]["shell"],
         json!({"kind":"login","fallback":false})
     );
+    assert_eq!(run["structuredContent"]["exit_status"], 0);
     session.close().await;
 
     let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &[]);
