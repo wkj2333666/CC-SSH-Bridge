@@ -3,4 +3,4 @@ target/
 .superpowers/
 __pycache__/
 *.pyc
-bin/
+/bin/
