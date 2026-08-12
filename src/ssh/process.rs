@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    HelperMode, HostSession, RuntimePaths, SessionRequest, SessionResult, SshPolicy,
+    HelperMode, HostSession, RuntimePaths, SessionOutput, SessionRequest, SessionResult, SshPolicy,
     build_ssh_argv, build_ssh_g_argv,
 };
 use crate::capability::{
@@ -243,8 +244,23 @@ impl SshRunner {
         })?;
         let (cwd, login_shell, command_timeout, response_timeout) = prepared;
         let preparation_ms = elapsed_ms(operation_started.elapsed());
-        let session_result = match session
-            .execute(
+        let (stdout_writer, stdout_reader) = duplex(64 * 1024);
+        let (stderr_writer, stderr_reader) = duplex(64 * 1024);
+        let session_cancel = cancel.child_token();
+        let capture_cancel = cancel.child_token();
+        let capture = self.output_store.capture(
+            stdout_reader,
+            stderr_reader,
+            CaptureLimits {
+                preview_bytes: limits.preview_bytes,
+                max_output_bytes: limits.max_output_bytes,
+            },
+            capture_cancel,
+        );
+        let capture_started = Instant::now();
+        let captured = self
+            .execute_with_capture(
+                &session,
                 SessionRequest {
                     command: request.command,
                     cwd,
@@ -256,11 +272,16 @@ impl SshRunner {
                     response_timeout,
                     stdout_limit: limits.max_output_bytes,
                     stderr_limit: limits.max_output_bytes,
+                    output: Some(SessionOutput {
+                        stdout: stdout_writer,
+                        stderr: stderr_writer,
+                    }),
                 },
-                cancel.clone(),
+                capture,
+                session_cancel,
             )
-            .await
-        {
+            .await;
+        let (session_result, output) = match captured {
             Ok(result) => result,
             Err(error) => {
                 if session.is_closed() {
@@ -274,18 +295,17 @@ impl SshRunner {
                 ));
             }
         };
+        let capture_ms = elapsed_ms(capture_started.elapsed());
+        let remote_process_may_continue = session_result.remote_process_may_continue;
         if session_result.timed_out {
             let mut error =
                 BridgeError::new(ErrorCode::CommandTimeout, "remote command timed out", false);
             error.details.host = Some(request.host.clone());
             error.details.elapsed_ms = Some(elapsed_ms(operation_started.elapsed()));
             error.details.exit_status = Some(session_result.status);
-            error.details.bytes_seen = Some(
-                u64::try_from(session_result.stdout.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(u64::try_from(session_result.stderr.len()).unwrap_or(u64::MAX)),
-            );
-            error.details.remote_process_may_continue = Some(false);
+            error.details.bytes_seen = Some(output.aggregate_bytes);
+            error.details.remote_process_may_continue = Some(remote_process_may_continue);
+            self.output_store.discard(&output).await;
             return Err(attach_selected_context(
                 error,
                 &request.host,
@@ -300,12 +320,9 @@ impl SshRunner {
                 false,
             );
             error.details.host = Some(request.host.clone());
-            error.details.bytes_seen = Some(
-                u64::try_from(session_result.stdout.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(u64::try_from(session_result.stderr.len()).unwrap_or(u64::MAX)),
-            );
-            error.details.remote_process_may_continue = Some(false);
+            error.details.bytes_seen = Some(output.aggregate_bytes);
+            error.details.remote_process_may_continue = Some(remote_process_may_continue);
+            self.output_store.discard(&output).await;
             return Err(attach_selected_context(
                 error,
                 &request.host,
@@ -313,14 +330,8 @@ impl SshRunner {
                 &shell,
             ));
         }
-        let capture_started = Instant::now();
-        let output = self
-            .capture_session_output(&session_result, limits, &cancel)
-            .await
-            .map_err(|error| {
-                attach_selected_context(error, &request.host, &capability.physical_root, &shell)
-            })?;
-        let capture_ms = elapsed_ms(capture_started.elapsed());
+        let status = session_result.status;
+        let session_ms = session_result.elapsed_ms;
         self.output_store
             .set_provenance(
                 &output,
@@ -333,16 +344,16 @@ impl SshRunner {
             )
             .await;
         Ok(RunResult {
-            status: session_result.status,
+            status,
             elapsed_ms: elapsed_ms(operation_started.elapsed()),
             shell,
             physical_root: capability.physical_root.clone(),
             output,
-            remote_process_may_continue: false,
+            remote_process_may_continue,
             helper_mode: session.helper_mode(),
             timing: RunTiming {
                 preparation_ms,
-                session_ms: session_result.elapsed_ms,
+                session_ms,
                 capture_ms,
             },
         })
@@ -410,39 +421,45 @@ impl SshRunner {
         }
     }
 
-    async fn capture_session_output(
+    async fn execute_with_capture<T, F>(
         &self,
-        result: &SessionResult,
-        limits: EffectiveLimits,
-        cancel: &CancellationToken,
-    ) -> BridgeResult<CapturedOutput> {
-        let (mut stdout_writer, stdout_reader) = duplex(64 * 1024);
-        let (mut stderr_writer, stderr_reader) = duplex(64 * 1024);
-        let stdout = result.stdout.clone();
-        let stderr = result.stderr.clone();
-        let stdout_task = tokio::spawn(async move {
-            let _ = stdout_writer.write_all(&stdout).await;
-            let _ = stdout_writer.shutdown().await;
-        });
-        let stderr_task = tokio::spawn(async move {
-            let _ = stderr_writer.write_all(&stderr).await;
-            let _ = stderr_writer.shutdown().await;
-        });
-        let captured = self
-            .output_store
-            .capture(
-                stdout_reader,
-                stderr_reader,
-                CaptureLimits {
-                    preview_bytes: limits.preview_bytes,
-                    max_output_bytes: limits.max_output_bytes,
-                },
-                cancel.clone(),
-            )
-            .await;
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-        captured
+        session: &Arc<HostSession>,
+        request: SessionRequest,
+        capture: F,
+        session_cancel: CancellationToken,
+    ) -> BridgeResult<(SessionResult, T)>
+    where
+        F: Future<Output = BridgeResult<T>>,
+    {
+        let mut session_future = Box::pin(session.execute(request, session_cancel.clone()));
+        let mut capture_future = Box::pin(capture);
+        tokio::select! {
+            biased;
+            session_result = &mut session_future => {
+                let captured = capture_future.await;
+                match (session_result, captured) {
+                    (Ok(session_result), Ok(captured)) => Ok((session_result, captured)),
+                    (Err(session_error), _) => Err(session_error),
+                    (Ok(_), Err(capture_error)) => Err(capture_error),
+                }
+            }
+            captured = &mut capture_future => {
+                let captured = match captured {
+                    Ok(captured) => captured,
+                    Err(error) => {
+                        session_cancel.cancel();
+                        let session_result = session_future.await;
+                        return match (error.code, session_result) {
+                            (ErrorCode::OutputLimit, _) => Err(error),
+                            (_, Err(session_error)) => Err(session_error),
+                            (_, Ok(_)) => Err(error),
+                        };
+                    }
+                };
+                let session_result = session_future.await?;
+                Ok((session_result, captured))
+            }
+        }
     }
 
     async fn capture_session_internal(
@@ -669,6 +686,7 @@ impl SshRunner {
                     response_timeout,
                     stdout_limit: request.stdout_limit,
                     stderr_limit: request.stderr_limit,
+                    output: None,
                 },
                 cancel.clone(),
             )

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    DuplexStream,
 };
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -26,8 +27,11 @@ use crate::config::EffectiveLimits;
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 
 const CANCEL_GRACE: Duration = Duration::from_millis(200);
+const OUTPUT_FORWARD_QUEUE_CAPACITY: usize = 16;
+const OUTPUT_FORWARD_CHUNK_BYTES: usize = 64 * 1024;
+const OUTPUT_FORWARD_BACKPRESSURE_GRACE: Duration = Duration::from_millis(25);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct SessionRequest {
     pub(crate) command: String,
     pub(crate) cwd: String,
@@ -39,6 +43,13 @@ pub(crate) struct SessionRequest {
     pub(crate) response_timeout: Duration,
     pub(crate) stdout_limit: u64,
     pub(crate) stderr_limit: u64,
+    pub(crate) output: Option<SessionOutput>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionOutput {
+    pub(crate) stdout: DuplexStream,
+    pub(crate) stderr: DuplexStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +92,89 @@ struct PendingRequest {
     aggregate_limit: usize,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    stdout_seen: u64,
+    stderr_seen: u64,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    stdout_sink: Option<OutputForwarder>,
+    stderr_sink: Option<OutputForwarder>,
     sender: oneshot::Sender<BridgeResult<SessionResult>>,
+}
+
+struct OutputForwarder {
+    sender: Option<mpsc::Sender<Vec<u8>>>,
+    cancel: Option<CancellationToken>,
+    failed: Arc<AtomicBool>,
+}
+
+impl OutputForwarder {
+    fn new(mut sink: DuplexStream) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(OUTPUT_FORWARD_QUEUE_CAPACITY);
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = Arc::clone(&failed);
+        tokio::spawn(async move {
+            while let Some(bytes) = receiver.recv().await {
+                let result = tokio::select! {
+                    biased;
+                    () = worker_cancel.cancelled() => return,
+                    result = sink.write_all(&bytes) => result,
+                };
+                if result.is_err() {
+                    worker_failed.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            cancel: Some(cancel),
+            failed,
+        }
+    }
+
+    async fn forward(&mut self, bytes: &[u8]) -> bool {
+        let Some(sender) = &self.sender else {
+            return false;
+        };
+        for chunk in bytes.chunks(OUTPUT_FORWARD_CHUNK_BYTES) {
+            if !matches!(
+                timeout(
+                    OUTPUT_FORWARD_BACKPRESSURE_GRACE,
+                    sender.send(chunk.to_vec())
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                self.failed.store(true, Ordering::Release);
+                if let Some(cancel) = self.cancel.take() {
+                    cancel.cancel();
+                }
+                self.sender.take();
+                return false;
+            }
+        }
+        true
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn finish(mut self) -> bool {
+        drop(self.sender.take());
+        drop(self.cancel.take());
+        self.failed()
+    }
+}
+
+impl Drop for OutputForwarder {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
 }
 
 struct Outbound {
@@ -428,6 +519,15 @@ impl HostSession {
         let request_id = self.inner.next_request_id()?;
         let frames = build_request_frames(request_id, &request, self.inner.max_payload)?;
         let (sender, mut receiver) = oneshot::channel();
+        let (stdout_sink, stderr_sink) = request
+            .output
+            .map(|output| {
+                (
+                    Some(OutputForwarder::new(output.stdout)),
+                    Some(OutputForwarder::new(output.stderr)),
+                )
+            })
+            .unwrap_or((None, None));
         let pending = PendingRequest {
             started,
             stdout_limit: usize::try_from(request.stdout_limit)
@@ -443,8 +543,12 @@ impl HostSession {
             .map_err(|_| BridgeError::invalid_argument("output limit is too large"))?,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            stdout_seen: 0,
+            stderr_seen: 0,
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_sink,
+            stderr_sink,
             sender,
         };
         self.inner.pending.lock().await.insert(request_id, pending);
@@ -710,28 +814,56 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
             let request = pending.get_mut(&frame.request_id).ok_or_else(|| {
                 protocol_error(&inner.host, "dispatcher returned an unknown request ID")
             })?;
-            let aggregate_used = request.stdout.len().saturating_add(request.stderr.len());
-            let (output, limit, truncated) = if frame.kind == FrameKind::Stdout {
-                (
-                    &mut request.stdout,
-                    request.stdout_limit,
-                    &mut request.stdout_truncated,
-                )
+            if frame.kind == FrameKind::Stdout {
+                let aggregate_used =
+                    request.stdout_seen.saturating_add(request.stderr_seen) as usize;
+                let remaining = request
+                    .stdout_limit
+                    .saturating_sub(request.stdout_seen as usize)
+                    .min(request.aggregate_limit.saturating_sub(aggregate_used));
+                if frame.payload.len() > remaining {
+                    request.stdout_truncated = true;
+                }
+                let allowed = remaining.min(frame.payload.len());
+                let write_failed = if let Some(sink) = request.stdout_sink.as_mut() {
+                    !sink.forward(&frame.payload[..allowed]).await
+                } else {
+                    request.stdout.extend_from_slice(&frame.payload[..allowed]);
+                    false
+                };
+                if write_failed {
+                    request.stdout_sink.take();
+                    request.stdout_truncated = true;
+                    request.stdout_limit = request.stdout_seen as usize;
+                }
+                request.stdout_seen = request
+                    .stdout_seen
+                    .saturating_add(frame.payload.len() as u64);
             } else {
-                (
-                    &mut request.stderr,
-                    request.stderr_limit,
-                    &mut request.stderr_truncated,
-                )
-            };
-            let remaining = limit
-                .saturating_sub(output.len())
-                .min(request.aggregate_limit.saturating_sub(aggregate_used));
-            if frame.payload.len() > remaining {
-                output.extend_from_slice(&frame.payload[..remaining]);
-                *truncated = true;
-            } else {
-                output.extend_from_slice(&frame.payload);
+                let aggregate_used =
+                    request.stdout_seen.saturating_add(request.stderr_seen) as usize;
+                let remaining = request
+                    .stderr_limit
+                    .saturating_sub(request.stderr_seen as usize)
+                    .min(request.aggregate_limit.saturating_sub(aggregate_used));
+                if frame.payload.len() > remaining {
+                    request.stderr_truncated = true;
+                }
+                let allowed = remaining.min(frame.payload.len());
+                let write_failed = if let Some(sink) = request.stderr_sink.as_mut() {
+                    !sink.forward(&frame.payload[..allowed]).await
+                } else {
+                    request.stderr.extend_from_slice(&frame.payload[..allowed]);
+                    false
+                };
+                if write_failed {
+                    request.stderr_sink.take();
+                    request.stderr_truncated = true;
+                    request.stderr_limit = request.stderr_seen as usize;
+                }
+                request.stderr_seen = request
+                    .stderr_seen
+                    .saturating_add(frame.payload.len() as u64);
             }
             Ok(())
         }
@@ -739,7 +871,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
             let (status, stdout_truncated, stderr_truncated, timed_out) =
                 parse_exit(&frame.payload)
                     .map_err(|message| protocol_error(&inner.host, &message))?;
-            let request = inner
+            let mut request = inner
                 .pending
                 .lock()
                 .await
@@ -750,13 +882,25 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                         "dispatcher returned an unknown exit request ID",
                     )
                 })?;
+            let stdout_forward_failed = request
+                .stdout_sink
+                .take()
+                .is_some_and(OutputForwarder::finish);
+            let stderr_forward_failed = request
+                .stderr_sink
+                .take()
+                .is_some_and(OutputForwarder::finish);
             let result = SessionResult {
                 request_id: frame.request_id,
                 status,
                 stdout: request.stdout,
                 stderr: request.stderr,
-                stdout_truncated: request.stdout_truncated || stdout_truncated,
-                stderr_truncated: request.stderr_truncated || stderr_truncated,
+                stdout_truncated: request.stdout_truncated
+                    || stdout_forward_failed
+                    || stdout_truncated,
+                stderr_truncated: request.stderr_truncated
+                    || stderr_forward_failed
+                    || stderr_truncated,
                 elapsed_ms: elapsed_ms(request.started.elapsed()),
                 remote_process_may_continue: false,
                 timed_out,
@@ -1018,7 +1162,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
-    use super::{HostSession, SessionRequest, parse_exit, valid_handshake};
+    use super::{HostSession, SessionOutput, SessionRequest, parse_exit, valid_handshake};
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
     use crate::ssh::SshPolicy;
@@ -1079,6 +1223,7 @@ mod tests {
             response_timeout: timeout,
             stdout_limit: 1024,
             stderr_limit: 1024,
+            output: None,
         }
     }
 
@@ -1144,6 +1289,62 @@ mod tests {
         assert_eq!(first.stdout, b"first");
         assert_eq!(second.stdout, b"second");
         shared.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unread_output_from_one_request_does_not_block_other_request_ids() {
+        let temp = TempDir::new().unwrap();
+        let mut session_limits = limits();
+        session_limits.max_frame_bytes = 4096;
+        let session = Arc::new(
+            HostSession::connect_with(
+                policy(),
+                "test-host".to_owned(),
+                session_limits,
+                OsString::from(fake_ssh(&temp)),
+                BTreeMap::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let (stdout_sink, stdout_reader) = tokio::io::duplex(1);
+        let (stderr_sink, stderr_reader) = tokio::io::duplex(1);
+        let mut noisy_request = request(
+            "dd if=/dev/zero bs=4096 count=64 2>/dev/null",
+            Duration::from_secs(2),
+        );
+        noisy_request.stdout_limit = 256 * 1024;
+        noisy_request.output = Some(SessionOutput {
+            stdout: stdout_sink,
+            stderr: stderr_sink,
+        });
+        let noisy = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move {
+                session
+                    .execute(noisy_request, CancellationToken::new())
+                    .await
+            })
+        };
+
+        sleep(Duration::from_millis(25)).await;
+        let quick = timeout(
+            Duration::from_secs(1),
+            session.execute(
+                request("printf quick", Duration::from_secs(1)),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("an unread peer stream must not block another request ID")
+        .unwrap();
+        assert_eq!(quick.stdout, b"quick");
+        let noisy = noisy.await.unwrap().unwrap();
+        assert!(noisy.stdout_truncated);
+        drop(stdout_reader);
+        drop(stderr_reader);
+        session.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -30,7 +30,7 @@ pub(crate) use process::{
     FixedOperationKind, FixedRunRequest, FixedRunResult, RootedPathInputs, render_fixed_command,
 };
 pub use process::{RunRequest, RunResult, RunTiming, SshRunner};
-pub(crate) use session::{HostSession, SessionRequest, SessionResult};
+pub(crate) use session::{HostSession, SessionOutput, SessionRequest, SessionResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
