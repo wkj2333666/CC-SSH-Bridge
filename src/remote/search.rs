@@ -60,27 +60,32 @@ cleanup() { rm -rf -- "$scratch"; }
 trap cleanup EXIT HUP INT TERM
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 mkfifo "$fifo" || exit 2
-(
-    find -H "$root" -type f -print0 2>/dev/null >"$fifo"
-    printf '%s' "$?" >"$status"
-) &
+find -H "$root" -type f -print0 2>/dev/null >"$fifo" &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
+if [ "$capped" -eq 1 ]; then
+    cap_wait=0
+    while [ "$cap_wait" -lt 100 ]; do
+        sleep 0
+        cap_wait=$((cap_wait + 1))
+    done
+    kill "$producer" 2>/dev/null || true
+fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
-producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ "$head_status" -ne 0 ] || [ "$drain_status" -ne 0 ] ||
-   [ "$wait_status" -ne 0 ] || [ "$producer_status" -ne 0 ]; then exit 2; fi
+if [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ]; then
+    if [ "$wait_status" -ne 0 ]; then exit 2; fi
+fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
@@ -131,12 +136,10 @@ if [ "$cc_rg_status" -ne 0 ] || [ "$cc_rg_empty" -ne 1 ] || [ "$cc_rg_ok" -ne 1 
 fi
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 engine_error=$scratch/engine-error
 input=$scratch/input
 cat >"$input" || exit 2
 mkfifo "$fifo" || exit 2
-(
 xargs -0 -r sh -c '
 query=$1
 binary=$2
@@ -147,25 +150,39 @@ status=$?
 if [ "$status" -eq 1 ]; then exit 0; fi
 if [ "$status" -gt 1 ]; then printf "%s" "$status" >"$engine_error"; exit 255; fi
 exit "$status"
-' cc-ssh-bridge-rg "$query" "$binary" "$engine_error" <"$input" >"$fifo" 2>/dev/null
-printf '%s' "$?" >"$status"
-) &
+' cc-ssh-bridge-rg "$query" "$binary" "$engine_error" <"$input" >"$fifo" 2>/dev/null &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
+drain=
+if [ "$capped" -eq 1 ]; then
+    dd <&3 >/dev/null 2>&1 &
+    drain=$!
+    cap_wait=0
+    while [ ! -e "$engine_error" ] && [ "$cap_wait" -lt 100 ]; do
+        sleep 0
+        cap_wait=$((cap_wait + 1))
+    done
+    kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
+fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
-producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ] ||
-   [ "$drain_status" -ne 0 ] || [ "$wait_status" -ne 0 ] ||
-   [ "$producer_status" -ne 0 ]; then exit 2; fi
+engine_status=$(cat "$engine_error" 2>/dev/null || :)
+if [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ]; then
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ]; then exit 2; fi
+else
+    case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
+fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
@@ -204,12 +221,10 @@ if [ "$cc_grep_status" -ne 0 ] || [ "$cc_grep_empty" -ne 1 ] ||
 fi
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 engine_error=$scratch/engine-error
 input=$scratch/input
 cat >"$input" || exit 2
 mkfifo "$fifo" || exit 2
-(
 xargs -0 -r sh -c '
 query=$1
 engine_error=$2
@@ -219,25 +234,39 @@ status=$?
 if [ "$status" -eq 1 ]; then exit 0; fi
 if [ "$status" -gt 1 ]; then printf "%s" "$status" >"$engine_error"; exit 255; fi
 exit "$status"
-' cc-ssh-bridge-grep "$query" "$engine_error" <"$input" >"$fifo" 2>/dev/null
-printf '%s' "$?" >"$status"
-) &
+' cc-ssh-bridge-grep "$query" "$engine_error" <"$input" >"$fifo" 2>/dev/null &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
+drain=
+if [ "$capped" -eq 1 ]; then
+    dd <&3 >/dev/null 2>&1 &
+    drain=$!
+    cap_wait=0
+    while [ ! -e "$engine_error" ] && [ "$cap_wait" -lt 100 ]; do
+        sleep 0
+        cap_wait=$((cap_wait + 1))
+    done
+    kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
+fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
-producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ] ||
-   [ "$drain_status" -ne 0 ] || [ "$wait_status" -ne 0 ] ||
-   [ "$producer_status" -ne 0 ]; then exit 2; fi
+engine_status=$(cat "$engine_error" 2>/dev/null || :)
+if [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ]; then
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ]; then exit 2; fi
+else
+    case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
+fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
