@@ -17,6 +17,15 @@ use super::{
     attach_fixed_result_context, compile_glob,
 };
 
+// Search candidates are an intermediate, best-effort index rather than the
+// user-visible result. Do not let the general MCP frame budget turn a broad
+// search into an unbounded grep of a remote data tree: on trees containing
+// large binary artifacts, reading several thousand candidates can take much
+// longer than enumerating them. A capped candidate set is reported through
+// SearchResult::truncated, so callers can narrow the path/glob and retry.
+const MAX_SEARCH_CANDIDATE_BYTES: usize = 128 * 1024;
+const MAX_SEARCH_OPERATION_TIMEOUT_MS: u64 = 30_000;
+
 macro_rules! bounded_sentinel {
     () => {
         r#"
@@ -277,6 +286,12 @@ pub(super) async fn search(
 ) -> BridgeResult<SearchResult> {
     let runner = &bridge.runner;
     let limits = runner.config().limits();
+    let candidate_limit = (MAX_SEARCH_CANDIDATE_BYTES + 1).min(limits.max_frame_bytes + 1);
+    let search_timeout = Duration::from_millis(
+        limits
+            .command_timeout_ms
+            .min(MAX_SEARCH_OPERATION_TIMEOUT_MS),
+    );
     let owner = InternalSpoolOwner::new();
     let candidates_result = bridge
         .execute_readonly_fixed(
@@ -286,7 +301,7 @@ pub(super) async fn search(
                 script: CANDIDATE_SCRIPT,
                 args: vec![
                     request.path.as_str().to_owned(),
-                    (limits.max_frame_bytes + 1).to_string(),
+                    candidate_limit.to_string(),
                 ],
                 stdin: None,
                 rooted_paths: RootedPathInputs {
@@ -294,9 +309,13 @@ pub(super) async fn search(
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["find_nul", "search_bound"],
+                // The static script enforces the smaller candidate budget.
+                // Keep the protocol capture bound at the normal frame limit
+                // so a hostile or test remote that ignores the script cap is
+                // still classified using the existing bounded-output path.
                 stdout_limit: (limits.max_frame_bytes + 1) as u64,
                 stderr_limit: 1024,
-                timeout: Duration::from_millis(limits.command_timeout_ms),
+                timeout: search_timeout,
                 cleanup: owner.registration(),
             },
             cancel.clone(),
@@ -461,7 +480,7 @@ pub(super) async fn search(
                 required_capabilities: required,
                 stdout_limit: (limits.max_frame_bytes + 1) as u64,
                 stderr_limit: 1024,
-                timeout: Duration::from_millis(limits.command_timeout_ms),
+                timeout: search_timeout,
                 cleanup: owner.registration(),
             },
             cancel,
