@@ -141,7 +141,7 @@ struct HostState {
 }
 
 struct HostRuntime {
-    preparation: Mutex<()>,
+    preparation: Arc<Mutex<()>>,
     flush: Mutex<()>,
     changed: Notify,
 }
@@ -503,6 +503,11 @@ impl EditCache {
         }
     }
 
+    pub(crate) async fn begin_barrier(&self, host: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let runtime = self.host_runtime(host).await;
+        Arc::clone(&runtime.preparation).lock_owned().await
+    }
+
     #[allow(
         dead_code,
         reason = "graceful cache shutdown is wired into MCP shutdown in batch 6F"
@@ -723,7 +728,7 @@ fn host_state_mut<'a>(state: &'a mut CacheState, host: &str) -> &'a mut HostStat
             last_transient: None,
             timer_running: false,
             runtime: Arc::new(HostRuntime {
-                preparation: Mutex::new(()),
+                preparation: Arc::new(Mutex::new(())),
                 flush: Mutex::new(()),
                 changed: Notify::new(),
             }),

@@ -592,6 +592,17 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         !remote.path().join("created.txt").exists(),
         "buffered mutation must not reach the remote before a barrier"
     );
+    let barrier = session
+        .call(
+            "remote_run",
+            json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
+        )
+        .await;
+    assert_eq!(barrier["structuredContent"]["exit_status"], 0);
+    assert_eq!(
+        std::fs::read(remote.path().join("created.txt")).unwrap(),
+        b"PATCH_SURFACE\n"
+    );
     assert!(!remote.path().join("SHOULD_NOT_EXIST").exists());
     assert!(!std::path::Path::new("SHOULD_NOT_EXIST").exists());
     session.close().await;
@@ -1311,6 +1322,17 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
             .contains("PATCH_SENTINEL")
     );
     assert!(!remote.path().join("created.txt").exists());
+    let barrier = call_json(
+        &tools,
+        "remote_run",
+        json!({"host":"dev", "cwd":remote.path(), "command":":", "shell":"sh"}),
+    )
+    .await;
+    assert_eq!(barrier["structuredContent"]["exit_status"], 0);
+    assert_eq!(
+        std::fs::read(remote.path().join("created.txt")).unwrap(),
+        b"PATCH_SENTINEL\n"
+    );
 
     let patch_error = call_json(
         &tools,
@@ -1738,6 +1760,17 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             "value={value:?}: {cached_text}"
         );
         assert!(!remote.path().join(&path).exists());
+        let barrier = call_json(
+            &tools,
+            "remote_run",
+            json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
+        )
+        .await;
+        assert_eq!(barrier["structuredContent"]["exit_status"], 0);
+        assert_eq!(
+            std::fs::read(remote.path().join(&path)).unwrap(),
+            value.as_bytes()
+        );
         assert_hostile_marker_absent(remote.path());
     }
 
