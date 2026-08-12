@@ -247,6 +247,10 @@ impl EditCache {
         })
     }
 
+    #[allow(
+        dead_code,
+        reason = "production read caching is outside the standalone cache test crate"
+    )]
     pub(crate) async fn cache_clean_if_absent(&self, key: CacheKey, snapshot: RemoteSnapshot) {
         let size = desired_size(&snapshot.desired);
         if size > self.config.max_bytes {
@@ -534,6 +538,10 @@ impl EditCache {
         self.state.lock().await.cached_bytes
     }
 
+    #[allow(
+        dead_code,
+        reason = "production immediate-write fallback is outside the standalone cache test crate"
+    )]
     pub(crate) async fn invalidate_clean_host(&self, host: &str) {
         let mut state = self.state.lock().await;
         let Some(host_state) = state.hosts.get_mut(host) else {
