@@ -7,14 +7,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio::process::Command;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
@@ -131,8 +131,6 @@ pub struct SshRunner {
     policies: Mutex<HashMap<String, Arc<SshPolicy>>>,
     identities: Mutex<HashMap<String, String>>,
     initializers: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    global_limit: Arc<Semaphore>,
-    host_limits: StdMutex<HashMap<String, Arc<Semaphore>>>,
     sessions: Mutex<HashMap<String, Arc<HostSession>>>,
     session_initializers: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -168,12 +166,6 @@ impl SshRunner {
                 "SSH executable must be an absolute path",
             ));
         }
-        if config.limits.global_concurrency == 0 {
-            return Err(BridgeError::invalid_config(
-                "global_concurrency must be positive",
-            ));
-        }
-        let global_concurrency = config.limits.global_concurrency;
         Ok(Self {
             config,
             runtime,
@@ -184,8 +176,6 @@ impl SshRunner {
             policies: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
             initializers: Mutex::new(HashMap::new()),
-            global_limit: Arc::new(Semaphore::new(global_concurrency)),
-            host_limits: StdMutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             session_initializers: Mutex::new(HashMap::new()),
         })
@@ -208,9 +198,6 @@ impl SshRunner {
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
         };
-        let _reservation = self
-            .acquire_operation(&request.host, limits.per_host_concurrency, &cancel)
-            .await?;
         if cancel.is_cancelled() {
             return Err(cancelled_error(false, 0));
         }
@@ -530,9 +517,6 @@ impl SshRunner {
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
         };
-        let _reservation = self
-            .acquire_operation(host, limits.per_host_concurrency, cancel)
-            .await?;
         let prepared = self
             .initialize_host(host, &root, limits.connect_timeout_ms, cancel)
             .await;
@@ -632,9 +616,6 @@ impl SshRunner {
 
         let initializer = self.initializer(&request.host).await;
         let initialize_guard = tokio::select! { biased; () = cancel.cancelled() => return Err(cancelled_error(false, 0)), guard = initializer.lock() => guard };
-        let _reservation = self
-            .acquire_operation(&request.host, limits.per_host_concurrency, &cancel)
-            .await?;
         let (policy, capability) = self
             .initialize_host(&request.host, &root, limits.connect_timeout_ms, &cancel)
             .await?;
@@ -947,48 +928,6 @@ impl SshRunner {
         parsed
     }
 
-    async fn acquire_operation(
-        &self,
-        host: &str,
-        per_host: usize,
-        cancel: &CancellationToken,
-    ) -> BridgeResult<OperationReservation> {
-        let host_limit = {
-            let mut limits = self.host_limits.lock().map_err(|_| {
-                BridgeError::new(ErrorCode::Io, "host limiter lock poisoned", false)
-            })?;
-            Arc::clone(
-                limits
-                    .entry(host.to_owned())
-                    .or_insert_with(|| Arc::new(Semaphore::new(per_host))),
-            )
-        };
-
-        loop {
-            let global = match Arc::clone(&self.global_limit).try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(TryAcquireError::NoPermits) => {
-                    wait_for_permit(Arc::clone(&self.global_limit), cancel).await?;
-                    continue;
-                }
-                Err(TryAcquireError::Closed) => return Err(limiter_closed()),
-            };
-            match Arc::clone(&host_limit).try_acquire_owned() {
-                Ok(host) => {
-                    return Ok(OperationReservation {
-                        _global: global,
-                        _host: host,
-                    });
-                }
-                Err(TryAcquireError::NoPermits) => {
-                    drop(global);
-                    wait_for_permit(Arc::clone(&host_limit), cancel).await?;
-                }
-                Err(TryAcquireError::Closed) => return Err(limiter_closed()),
-            }
-        }
-    }
-
     async fn run_child(
         &self,
         spec: ChildSpec,
@@ -1258,11 +1197,6 @@ impl SshRunner {
     }
 }
 
-struct OperationReservation {
-    _global: OwnedSemaphorePermit,
-    _host: OwnedSemaphorePermit,
-}
-
 struct ChildOutcome {
     output: ChildCaptured,
 }
@@ -1431,24 +1365,6 @@ enum Stop {
     OutputLimit,
     Deadline,
     InternalError(Box<BridgeError>),
-}
-
-async fn wait_for_permit(
-    semaphore: Arc<Semaphore>,
-    cancel: &CancellationToken,
-) -> BridgeResult<()> {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(cancelled_error(false, 0)),
-        result = semaphore.acquire_owned() => {
-            drop(result.map_err(|_| limiter_closed())?);
-            Ok(())
-        }
-    }
-}
-
-fn limiter_closed() -> BridgeError {
-    BridgeError::new(ErrorCode::Io, "SSH concurrency limiter is closed", false)
 }
 
 fn remaining_timeout(deadline: Instant) -> BridgeResult<Duration> {

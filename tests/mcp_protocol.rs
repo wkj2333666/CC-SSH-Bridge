@@ -13,7 +13,7 @@ use cc_ssh_bridge::mcp::{
     ToolFuture, ToolService, WireBudget, duplicate_request_id_response, internal_error_response,
     invalid_params_response, invalid_request_id_response, invalid_request_response,
     maximum_compact_fallback_result_bytes, method_not_found_response, parse_error_response,
-    parse_strict_json, request_too_large_response, result_response, server_busy_response,
+    parse_strict_json, request_too_large_response, result_response,
     server_not_initialized_response,
 };
 use cc_ssh_bridge::{BridgeError, ErrorCode, ErrorDetails};
@@ -331,10 +331,6 @@ fn task7_protocol_constructors_are_fixed_and_preserve_trusted_ids() {
     assert_eq!(
         request_too_large_response(),
         json!({"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Request too large"}})
-    );
-    assert_eq!(
-        server_busy_response(RequestId::try_from(json!(11)).unwrap()),
-        json!({"jsonrpc":"2.0","id":11,"error":{"code":-32000,"message":"Server busy"}})
     );
     assert_eq!(
         result_response(
@@ -660,33 +656,26 @@ impl Session {
 }
 
 #[test]
-fn task7_constructor_enforces_exact_frame_and_inflight_bounds() {
+fn task7_constructor_enforces_exact_frame_bounds() {
     let service = Arc::new(NullService {
         definitions: lifecycle_definitions(),
     });
     let required =
         required_mcp_frame_bytes(service.definitions(), 0, &RequestId::synthetic_max_wire())
             .unwrap();
-    assert!(McpServer::new(Arc::clone(&service), required, 2).is_ok());
+    assert!(McpServer::new(Arc::clone(&service), required).is_ok());
 
-    let too_small = McpServer::new(Arc::clone(&service), required - 1, 2).unwrap_err();
+    let too_small = McpServer::new(Arc::clone(&service), required - 1).unwrap_err();
     assert_eq!(
         too_small,
         BridgeError::invalid_argument("MCP frame bound is invalid")
     );
     let too_large =
-        McpServer::new(Arc::clone(&service), cc_ssh_bridge::MAX_FRAME_BYTES + 1, 2).unwrap_err();
+        McpServer::new(Arc::clone(&service), cc_ssh_bridge::MAX_FRAME_BYTES + 1).unwrap_err();
     assert_eq!(
         too_large,
         BridgeError::invalid_argument("MCP frame bound is invalid")
     );
-    for invalid in [0, 33] {
-        let error = McpServer::new(Arc::clone(&service), required, invalid).unwrap_err();
-        assert_eq!(
-            error,
-            BridgeError::invalid_argument("MCP in-flight bound is invalid")
-        );
-    }
 }
 
 #[tokio::test]
@@ -698,9 +687,9 @@ async fn task7_constructor_max_id_counts_every_fixed_response_and_live_control_r
         let id = RequestId::synthetic_max_wire();
         let id_value = serde_json::to_value(&id).unwrap();
         let required = required_mcp_frame_bytes(service.definitions(), 0, &id).unwrap();
-        assert!(McpServer::new(Arc::clone(&service), required, 2).is_ok());
+        assert!(McpServer::new(Arc::clone(&service), required).is_ok());
         assert_eq!(
-            McpServer::new(Arc::clone(&service), required - 1, 2).unwrap_err(),
+            McpServer::new(Arc::clone(&service), required - 1).unwrap_err(),
             BridgeError::invalid_argument("MCP frame bound is invalid")
         );
 
@@ -714,14 +703,13 @@ async fn task7_constructor_max_id_counts_every_fixed_response_and_live_control_r
             internal_error_response(id.clone()),
             server_not_initialized_response(id.clone()),
             request_too_large_response(),
-            server_busy_response(id.clone()),
         ];
         for response in fixed {
             assert!(serde_json::to_vec(&response).unwrap().len() <= required);
             assert!(serialize_json_line(&response, required).is_ok());
         }
 
-        let server = McpServer::new(service, required, 2).unwrap();
+        let server = McpServer::new(service, required).unwrap();
         let frames = [
             initialize(id_value.clone(), "2025-11-25"),
             json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
@@ -791,7 +779,7 @@ async fn initialize_client_is_accepted(version: &str, client_info: Value) -> boo
     let service = Arc::new(NullService {
         definitions: lifecycle_definitions(),
     });
-    let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+    let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
     let request = json!({
         "jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":version,
@@ -810,7 +798,7 @@ async fn task7_lifecycle_initialize_ready_ping_and_list() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 2).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let frames = [
             initialize(json!(1), "2025-11-25"),
             json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
@@ -836,7 +824,7 @@ async fn task7_lifecycle_optional_empty_method_params_may_be_absent() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 2).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let frames = [
             initialize(json!(1), "2025-11-25"),
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -859,7 +847,7 @@ async fn task7_lifecycle_request_notification_barrier_and_strict_envelope() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 2).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let frames = [
             json!({"jsonrpc":"2.0","method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":null,"method":"ping","params":{}}),
@@ -903,7 +891,7 @@ async fn task7_lifecycle_invalid_id_and_nonobject_envelope_matrix() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 32).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let frames = [
             json!(null),
             json!([]),
@@ -932,7 +920,7 @@ async fn task7_lifecycle_invalid_id_and_nonobject_envelope_matrix() {
 async fn task7_lifecycle_june_open_and_november_closed_method_extensions() {
     timeout(Duration::from_secs(5), async {
         let service = Arc::new(NullService { definitions: lifecycle_definitions() });
-        let server = McpServer::new(Arc::clone(&service), MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(Arc::clone(&service), MIN_MCP_FRAME_BYTES).unwrap();
         let june = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"},"extension":{"bounded":true}}}),
             json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{"extension":true}}),
@@ -945,7 +933,7 @@ async fn task7_lifecycle_june_open_and_november_closed_method_extensions() {
         assert_eq!(responses[1]["result"], json!({}));
         assert!(responses[2]["result"]["tools"].is_array());
 
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let november = [
             initialize(json!(1), "2025-11-25"),
             json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
@@ -965,7 +953,7 @@ async fn task7_lifecycle_june_initialize_rejects_unnegotiated_task() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let request = json!({
             "jsonrpc":"2.0","id":1,"method":"initialize","params":{
                 "protocolVersion":"2025-06-18",
@@ -996,7 +984,6 @@ async fn task7_lifecycle_official_six_method_versioned_params_matrix() {
             let mut session = Session::start(McpServer::new(
                 Arc::clone(&tools),
                 MIN_MCP_FRAME_BYTES,
-                2,
             ).unwrap()).await;
             let init_extension = if june { json!({"extension":true}) } else { json!({}) };
             session.send(&json!({
@@ -1072,7 +1059,6 @@ async fn task7_lifecycle_duplicate_and_notification_shapes_have_zero_service_eff
         let mut session = Session::start(McpServer::new(
             Arc::clone(&tools),
             MIN_MCP_FRAME_BYTES,
-            1,
         ).unwrap()).await;
         session.send(&json!({"jsonrpc":"2.0","method":"initialize","params":{}})).await;
         session.send(&initialize(json!(1), "2025-11-25")).await;
@@ -1103,7 +1089,7 @@ async fn task7_lifecycle_duplicate_and_notification_shapes_have_zero_service_eff
 async fn task7_lifecycle_complete_validation_and_zero_service_effect_matrix() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let server = McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 32).unwrap();
+        let server = McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap();
         let frames = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"clientInfo":{"name":"x","version":"1"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"x","version":"1"}}}),
@@ -1175,7 +1161,7 @@ async fn task7_lifecycle_june_rejects_task_for_initialized_and_cancelled() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
         let mut session = Session::start(
-            McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap(),
+            McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap(),
         )
         .await;
         session.send(&initialize(json!(1), "2025-06-18")).await;
@@ -1221,7 +1207,7 @@ async fn task7_lifecycle_june_rejects_task_for_initialized_and_cancelled() {
 async fn task7_lifecycle_strict_json_errors_are_fixed_and_side_effect_free() {
     timeout(Duration::from_secs(5), async {
         let service = Arc::new(NullService { definitions: lifecycle_definitions() });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 2).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let input = br#"{"jsonrpc":"2.0","id":1,"method":"ping","method":"initialize"}
 {"jsonrpc":"2.0","id":1,"method":]
 {"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}
@@ -1264,7 +1250,7 @@ async fn task7_lifecycle_version_shapes_and_absolute_uri_policy() {
         });
         for (request, accepted) in [(june_with_icons, false), (invalid_uri, false), (valid_latest, true), (numeric_dns, true)] {
             let service = Arc::new(NullService { definitions: lifecycle_definitions() });
-            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 2).unwrap();
+            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
             let (responses, result) = serve_frames(server, &[request]).await;
             assert!(result.is_ok());
             assert_eq!(responses.len(), 1);
@@ -1313,7 +1299,7 @@ async fn task7_lifecycle_uri_state_machine_adversarial_matrix() {
             let service = Arc::new(NullService {
                 definitions: lifecycle_definitions(),
             });
-            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
             let (responses, result) = serve_frames(server, &[request]).await;
             assert!(result.is_ok());
             assert_eq!(
@@ -1346,14 +1332,14 @@ async fn task7_lifecycle_client_info_exact_limits_and_plus_one() {
             client.as_object_mut().unwrap().insert(field.into(), Value::String(value));
             let request = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":client}});
             let service = Arc::new(NullService { definitions: lifecycle_definitions() });
-            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
             let (responses, _) = serve_frames(server, &[request]).await;
             assert_eq!(responses[0].get("result").is_some(), accepted, "field {field}");
         }
         for (src, accepted) in [(exact_icon.clone(), true), (format!("{exact_icon}a"), false)] {
             let request = json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"x","version":"1","icons":[{"src":src}]}}});
             let service = Arc::new(NullService { definitions: lifecycle_definitions() });
-            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
             let (responses, _) = serve_frames(server, &[request]).await;
             assert_eq!(responses[0].get("result").is_some(), accepted);
         }
@@ -1478,7 +1464,7 @@ async fn task7_panic_is_fixed_per_id_and_owner_continues() {
     timeout(Duration::from_secs(5), async {
         for mode in [PanicMode::Construct, PanicMode::FirstPoll, PanicMode::AfterPoll] {
             let tools = Arc::new(PanicTools::new(mode));
-            let mut session = Session::start(McpServer::new(tools, MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+            let mut session = Session::start(McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap()).await;
             session.ready().await;
             session.send(&json!({"jsonrpc":"2.0","id":"boom","method":"tools/call","params":{"name":"panic","arguments":{}}})).await;
             let panic_response = session.recv().await;
@@ -1495,7 +1481,7 @@ async fn task7_panic_is_fixed_per_id_and_owner_continues() {
 async fn task7_dispatch_completes_out_of_order_and_propagates_exact_context() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 2).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1530,10 +1516,10 @@ async fn task7_dispatch_completes_out_of_order_and_propagates_exact_context() {
 }
 
 #[tokio::test]
-async fn task7_inflight_rejects_duplicate_before_shape_and_saturation() {
+async fn task7_inflight_rejects_duplicate_before_shape_and_distinct_call() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1542,11 +1528,11 @@ async fn task7_inflight_rejects_duplicate_before_shape_and_saturation() {
         session.send(&json!({"jsonrpc":"2.0","id":1.0,"method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         assert_eq!(session.recv().await, invalid_request_response());
         session.send(&json!({"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo","arguments":{"text":"x"}}})).await;
-        let busy = session.recv().await;
-        assert_eq!(busy["id"], "1");
-        assert_eq!(busy["error"]["code"], -32000);
-        assert_eq!(tools.synchronous_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(tools.first_polls.load(Ordering::SeqCst), 1);
+        let distinct = session.recv().await;
+        assert_eq!(distinct["id"], "1");
+        assert_eq!(distinct["result"]["content"][0]["text"], "x");
+        assert_eq!(tools.synchronous_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tools.first_polls.load(Ordering::SeqCst), 2);
         tools.release.add_permits(1);
         assert_eq!(session.recv().await["id"], 1);
         assert!(session.close().await.is_ok());
@@ -1554,10 +1540,14 @@ async fn task7_inflight_rejects_duplicate_before_shape_and_saturation() {
 }
 
 #[tokio::test]
-async fn task7_inflight_id_and_permit_release_before_response_backlog() {
+async fn task7_inflight_id_release_precedes_response_backlog() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start_with_output_capacity(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap(), 1).await;
+        let mut session = Session::start_with_output_capacity(
+            McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap(),
+            1,
+        )
+        .await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"reuse","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1582,19 +1572,21 @@ async fn task7_inflight_id_and_permit_release_before_response_backlog() {
 }
 
 #[tokio::test]
-async fn task7_inflight_third_unique_known_call_is_busy_at_bound_two() {
+async fn task7_mcp_admits_calls_without_an_artificial_inflight_bound() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 2).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         for id in [1, 2] {
             session.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         }
         tools.wait_for_polls(2).await;
         session.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"busy"}}})).await;
-        assert_eq!(session.recv().await, json!({"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Server busy"}}));
-        assert_eq!(tools.synchronous_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(tools.first_polls.load(Ordering::SeqCst), 2);
+        let third = session.recv().await;
+        assert_eq!(third["id"], 3);
+        assert_eq!(third["result"]["content"][0]["text"], "busy");
+        assert_eq!(tools.synchronous_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(tools.first_polls.load(Ordering::SeqCst), 3);
         tools.release.add_permits(2);
         let first = session.recv().await["id"].clone();
         let second = session.recv().await["id"].clone();
@@ -1608,7 +1600,7 @@ async fn task7_inflight_oversized_flood_reaps_one_completion_and_releases_id() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
         let mut session = Session::start_with_capacities(
-            McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap(),
+            McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap(),
             4 * 1024 * 1024,
             128 * 1024,
         )
@@ -1637,7 +1629,7 @@ async fn task7_inflight_oversized_flood_reaps_one_completion_and_releases_id() {
                 saw_second = true;
             }
         }
-        assert!(saw_second, "the completed ID and permit must be reusable");
+        assert!(saw_second, "the completed ID must be reusable");
         assert_eq!(tools.synchronous_calls.load(Ordering::SeqCst), 2);
         assert!(session.close().await.is_ok());
     })
@@ -1649,7 +1641,7 @@ async fn task7_inflight_oversized_flood_reaps_one_completion_and_releases_id() {
 async fn task7_dispatch_known_invalid_arguments_are_normal_tool_results() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 2).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unknown","arguments":{}}})).await;
         assert_eq!(session.recv().await["error"]["code"], -32602);
@@ -1668,7 +1660,7 @@ async fn task7_dispatch_known_invalid_arguments_are_normal_tool_results() {
 async fn task7_cancellation_cancels_shared_token_and_suppresses_response() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"job","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1690,7 +1682,7 @@ async fn task7_cancellation_cancels_shared_token_and_suppresses_response() {
 async fn task7_cancellation_fully_validates_before_touching_token() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1725,7 +1717,7 @@ async fn task7_cancellation_fully_validates_before_touching_token() {
 async fn task7_cancellation_shared_token_works_in_service_to_test_direction() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"manual","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -1761,12 +1753,12 @@ fn task7_cancellation_owner_select_has_required_order_and_empty_guard() {
 async fn task7_cancellation_buffered_frame_wins_over_ready_completion() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"race","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
-        // On the current-thread runtime the buffered frame and durable permit
-        // are both ready before the owner is scheduled again.
+        // On the current-thread runtime the buffered frame and released tool
+        // completion are both ready before the owner is scheduled again.
         session.send(&json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"race"}})).await;
         tools.release.add_permits(1);
         session.send(&json!({"jsonrpc":"2.0","id":2,"method":"ping","params":{}})).await;
@@ -1780,7 +1772,7 @@ async fn task7_cancellation_versioned_extension_policy_unknown_duplicate_and_lat
     timeout(Duration::from_secs(5), async {
         for (version, extra_cancels) in [("2025-06-18", true), ("2025-11-25", false)] {
             let tools = Arc::new(StubTools::new());
-            let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+            let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
             session.send(&initialize(json!(100), version)).await;
             session.recv().await;
             session.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})).await;
@@ -1810,7 +1802,7 @@ async fn task7_cancellation_versioned_extension_policy_unknown_duplicate_and_lat
 async fn task7_cancellation_notification_flood_cannot_starve_ready_completion() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(StubTools::new());
-        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         session.send(&json!({"jsonrpc":"2.0","id":"done","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
         tools.wait_for_polls(1).await;
@@ -2348,7 +2340,7 @@ async fn run_closing_matrix_case(source: ClosingSource, active_kind: ClosingActi
         128 * 1024
     };
     let (mut input, server_reader) = tokio::io::duplex(input_capacity);
-    let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES, 1).unwrap();
+    let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap();
     let serve = tokio::spawn(server.serve(server_reader, writer));
 
     send_closing_frame(&mut input, initialize(json!(1), "2025-11-25"))
@@ -2583,7 +2575,7 @@ async fn task7_writer_one_byte_writes_complete_noninterleaved_lines() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let mut input = Vec::new();
         for frame in [
             initialize(json!(1), "2025-11-25"),
@@ -2643,7 +2635,7 @@ async fn task7_writer_failure_shutdown_and_backpressure_are_fixed() {
             let service = Arc::new(NullService {
                 definitions: lifecycle_definitions(),
             });
-            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+            let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
             let mut input = Vec::new();
             for frame in std::iter::once(initialize(json!(1), "2025-11-25")).chain(
                 (0..20).map(|id| json!({"jsonrpc":"2.0","id":id + 10,"method":"ping","params":{}})),
@@ -2677,7 +2669,7 @@ async fn task7_writer_prefix_error_and_panic_close_without_replacement() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1)
+        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES)
             .unwrap()
             .serve(std::io::Cursor::new(input.clone()), writer)
             .await
@@ -2688,7 +2680,7 @@ async fn task7_writer_prefix_error_and_panic_close_without_replacement() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1)
+        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES)
             .unwrap()
             .serve(std::io::Cursor::new(input), PanicWriter)
             .await
@@ -2714,7 +2706,7 @@ async fn task7_writer_pending_forever_after_controlled_prefix_is_bounded() {
             definitions: lifecycle_definitions(),
         });
         let started = Instant::now();
-        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1)
+        let error = McpServer::new(service, MIN_MCP_FRAME_BYTES)
             .unwrap()
             .serve(std::io::Cursor::new(input), writer)
             .await
@@ -2735,7 +2727,7 @@ async fn task7_writer_failure_is_monitored_while_input_stays_open() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let (mut input, server_reader) = tokio::io::duplex(4096);
         let writer = TestWriter {
             bytes: Arc::new(StdMutex::new(Vec::new())),
@@ -2764,7 +2756,7 @@ async fn task7_writer_failure_closes_cooperative_and_already_ready_calls_without
     timeout(Duration::from_secs(5), async {
         for make_ready in [false, true] {
             let tools = Arc::new(StubTools::new());
-            let server = McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap();
+            let server = McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap();
             let (mut input, server_reader) = tokio::io::duplex(128 * 1024);
             let bytes = Arc::new(StdMutex::new(Vec::new()));
             let fail = Arc::new(AtomicBool::new(false));
@@ -2822,7 +2814,7 @@ async fn task7_writer_failure_aborts_token_ignoring_call_within_cleanup_bound() 
             definitions: lifecycle_definitions(),
             entered: Arc::clone(&entered),
         });
-        let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap();
         let (mut input, server_reader) = tokio::io::duplex(128 * 1024);
         let bytes = Arc::new(StdMutex::new(Vec::new()));
         let fail = Arc::new(AtomicBool::new(false));
@@ -2895,7 +2887,7 @@ impl ToolService for HugeTools {
 async fn task7_writer_capacity_overflow_writes_zero_bytes_of_that_frame() {
     timeout(Duration::from_secs(5), async {
         let tools = Arc::new(HugeTools { definitions: vec![lifecycle_definitions().remove(1)] });
-        let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap();
         let (mut input, server_reader) = tokio::io::duplex(128 * 1024);
         let (writer, bytes) = test_writer(false);
         let serve = tokio::spawn(server.serve(server_reader, writer));
@@ -2931,12 +2923,12 @@ async fn task7_eof_clean_and_partial_have_exact_precedence() {
         let service = Arc::new(NullService {
             definitions: lifecycle_definitions(),
         });
-        let server = McpServer::new(Arc::clone(&service), MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(Arc::clone(&service), MIN_MCP_FRAME_BYTES).unwrap();
         let (responses, result) = serve_raw(server, Vec::new()).await;
         assert!(responses.is_empty());
         assert!(result.is_ok());
 
-        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1).unwrap();
+        let server = McpServer::new(service, MIN_MCP_FRAME_BYTES).unwrap();
         let (responses, result) = serve_raw(server, b"{".to_vec()).await;
         assert_eq!(responses, [parse_error_response()]);
         let error = result.unwrap_err();
@@ -2969,7 +2961,7 @@ async fn task7_eof_partial_parse_error_yields_to_later_writer_failure() {
             let service = Arc::new(NullService {
                 definitions: lifecycle_definitions(),
             });
-            let error = McpServer::new(service, MIN_MCP_FRAME_BYTES, 1)
+            let error = McpServer::new(service, MIN_MCP_FRAME_BYTES)
                 .unwrap()
                 .serve(std::io::Cursor::new(b"{".to_vec()), writer)
                 .await
@@ -3006,7 +2998,7 @@ async fn task7_eof_aborts_token_ignoring_yielding_task_within_bound() {
     timeout(Duration::from_secs(5), async {
         let entered = Arc::new(Notify::new());
         let tools = Arc::new(IgnoringTools { definitions: lifecycle_definitions(), entered: Arc::clone(&entered) });
-        let mut session = Session::start(McpServer::new(tools, MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+        let mut session = Session::start(McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap()).await;
         session.ready().await;
         let notified = entered.notified();
         session.send(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"block","arguments":{}}})).await;
@@ -3024,7 +3016,7 @@ async fn task7_eof_cancels_cooperative_and_suppresses_already_ready_completion()
     timeout(Duration::from_secs(5), async {
         for make_ready in [false, true] {
             let tools = Arc::new(StubTools::new());
-            let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES, 1).unwrap()).await;
+            let mut session = Session::start(McpServer::new(Arc::clone(&tools), MIN_MCP_FRAME_BYTES).unwrap()).await;
             session.ready().await;
             session.send(&json!({"jsonrpc":"2.0","id":"closing","method":"tools/call","params":{"name":"block","arguments":{}}})).await;
             tools.wait_for_polls(1).await;
@@ -3448,7 +3440,7 @@ async fn task7_adversarial_exact_eight_mib_and_plus_one_recovery() {
     let service = Arc::new(NullService {
         definitions: lifecycle_definitions(),
     });
-    let server = McpServer::new(service, cc_ssh_bridge::MAX_FRAME_BYTES, 1).unwrap();
+    let server = McpServer::new(service, cc_ssh_bridge::MAX_FRAME_BYTES).unwrap();
     let (responses, result) = serve_raw(server, input).await;
 
     assert!(result.is_ok());
@@ -3483,7 +3475,7 @@ async fn task7_adversarial_nul_utf8_and_non_utf8_are_fixed_parse_errors() {
     let service = Arc::new(NullService {
         definitions: lifecycle_definitions(),
     });
-    let server = McpServer::new(service, cc_ssh_bridge::MAX_FRAME_BYTES, 1).unwrap();
+    let server = McpServer::new(service, cc_ssh_bridge::MAX_FRAME_BYTES).unwrap();
     let (responses, result) = serve_raw(server, input).await;
     assert!(result.is_ok());
     assert_eq!(

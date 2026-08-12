@@ -19,7 +19,7 @@ use crate::error::{BridgeError, BridgeResult};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 
 const MCP_TASK_CLEANUP_GRACE: Duration = Duration::from_millis(250);
@@ -61,7 +61,6 @@ struct BorrowedCallResponse<'a> {
 struct InFlight {
     cancel: tokio_util::sync::CancellationToken,
     cancelled_by_client: bool,
-    _permit: OwnedSemaphorePermit,
 }
 
 struct CompletedCall {
@@ -79,13 +78,14 @@ enum OwnerEvent {
 pub struct McpServer<S> {
     service: Arc<S>,
     max_frame_bytes: usize,
-    max_inflight: usize,
     compact_fallback_result_bytes: usize,
 }
 
+const MCP_WRITER_CHANNEL_CAPACITY: usize = 16;
+
 impl<S: ToolService> McpServer<S> {
     #[allow(clippy::result_large_err)]
-    pub fn new(service: Arc<S>, max_frame_bytes: usize, max_inflight: usize) -> BridgeResult<Self> {
+    pub fn new(service: Arc<S>, max_frame_bytes: usize) -> BridgeResult<Self> {
         let compact_fallback_result_bytes = render::maximum_compact_fallback_result_bytes();
         let synthetic_id = RequestId::synthetic_max_wire();
         let required = required_mcp_frame_bytes(
@@ -97,15 +97,9 @@ impl<S: ToolService> McpServer<S> {
         if max_frame_bytes < required || max_frame_bytes > crate::MAX_FRAME_BYTES {
             return Err(BridgeError::invalid_argument("MCP frame bound is invalid"));
         }
-        if max_inflight == 0 || max_inflight > 32 {
-            return Err(BridgeError::invalid_argument(
-                "MCP in-flight bound is invalid",
-            ));
-        }
         Ok(Self {
             service,
             max_frame_bytes,
-            max_inflight,
             compact_fallback_result_bytes,
         })
     }
@@ -115,8 +109,7 @@ impl<S: ToolService> McpServer<S> {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let channel_capacity = self.max_inflight + 8;
-        let (sender, receiver) = mpsc::channel(channel_capacity);
+        let (sender, receiver) = mpsc::channel(MCP_WRITER_CHANNEL_CAPACITY);
         let suppress_call_responses = Arc::new(AtomicBool::new(false));
         let writer_suppression = Arc::clone(&suppress_call_responses);
         let max_frame_bytes = self.max_frame_bytes;
@@ -126,7 +119,6 @@ impl<S: ToolService> McpServer<S> {
         let mut frames = FrameReader::new(BufReader::new(reader), self.max_frame_bytes);
         let mut state = ProtocolState::AwaitInitialize;
         let mut shape = None;
-        let permits = Arc::new(Semaphore::new(self.max_inflight));
         let mut active = HashMap::<RequestId, InFlight>::new();
         let mut task_ids = HashMap::<Id, RequestId>::new();
         let mut join_set = JoinSet::<CompletedCall>::new();
@@ -185,7 +177,6 @@ impl<S: ToolService> McpServer<S> {
                         &frame,
                         &mut state,
                         &mut shape,
-                        &permits,
                         &mut active,
                         &mut task_ids,
                         &mut join_set,
@@ -308,7 +299,6 @@ impl<S: ToolService> McpServer<S> {
         frame: &[u8],
         state: &mut ProtocolState,
         negotiated_shape: &mut Option<ProtocolShape>,
-        permits: &Arc<Semaphore>,
         active: &mut HashMap<RequestId, InFlight>,
         task_ids: &mut HashMap<Id, RequestId>,
         join_set: &mut JoinSet<CompletedCall>,
@@ -444,9 +434,6 @@ impl<S: ToolService> McpServer<S> {
                 {
                     return Some(invalid_params_response(id));
                 }
-                let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
-                    return Some(server_busy_response(id));
-                };
                 let Some(wire_budget) = WireBudget::for_response(
                     self.max_frame_bytes,
                     &id,
@@ -464,7 +451,6 @@ impl<S: ToolService> McpServer<S> {
                     InFlight {
                         cancel,
                         cancelled_by_client: false,
-                        _permit: permit,
                     },
                 );
                 let name = name.to_owned();
