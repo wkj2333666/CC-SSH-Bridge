@@ -42,7 +42,28 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          set -o pipefail
+          cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings \
+            2>&1 | tee clippy-output.log
+          clippy_status=${PIPESTATUS[0]}
+          if (( clippy_status != 0 )); then
+            tail -n 200 clippy-output.log \
+              | grep -E '^(error|warning|[[:space:]]*-->|[[:space:]]*\||[[:space:]]*=[[:space:]]*(help|note):)' \
+              | while IFS= read -r detail; do
+              if [[ -n "$detail" ]]; then
+                detail="${detail//'%'/'%25'}"
+                detail="${detail//$'\r'/'%0D'}"
+                detail="${detail//$'\n'/'%0A'}"
+                echo "::error file=.github/workflows/ci.yml,line=43,title=Rust Clippy output::$detail"
+              fi
+            done
+          fi
+          exit "$clippy_status"
 
       - name: Run tests
         shell: bash
