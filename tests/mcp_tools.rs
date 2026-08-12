@@ -496,9 +496,11 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         .await;
     assert_remote_context(&listed, remote.path());
     assert!(
-        text_json(&listed)
-            .to_string()
-            .contains("hostile $(touch SHOULD_NOT_EXIST)\\nname.txt")
+        json_contains_exact_encoded_bytes(
+            &text_json(&listed),
+            b"hostile $(touch SHOULD_NOT_EXIST)\nname.txt"
+        ),
+        "listed={listed}"
     );
 
     let stated = session
@@ -1208,7 +1210,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "path":remote.path(), "max_entries":32}),
     )
     .await;
-    assert!(text_json(&listed).to_string().contains("utf8.txt"));
+    assert!(
+        json_contains_exact_encoded_bytes(&text_json(&listed), b"utf8.txt"),
+        "listed={listed}"
+    );
     assert!(listed["structuredContent"].get("entries").is_none());
 
     std::fs::write(&log, b"").unwrap();
@@ -2079,7 +2084,7 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
                 RemoteRunRequest {
                     host: "dev".to_owned(),
                     command: "printf NEVER".to_owned(),
-                    cwd: None,
+                    cwd: Some(remote.path().to_string_lossy().into_owned()),
                     shell: RunShell::Sh,
                     timeout_ms: None,
                     stdin: None,
@@ -2344,7 +2349,7 @@ async fn retain_all_large_models(
             "{name} did not exercise the intended full success model"
         );
         assert_eq!(
-            result["structuredContent"]["detail_retained"],
+            result["structuredContent"]["truncated"],
             true,
             "{name}: serialized_bytes={serialized_bytes}, result_budget={}",
             compact_context().wire_budget.result_bytes
