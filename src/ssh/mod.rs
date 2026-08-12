@@ -4,6 +4,11 @@
 )]
 
 mod argv;
+#[allow(
+    dead_code,
+    reason = "migration batch 2A stages the frame codec before the 2B dispatcher consumer"
+)]
+mod frame;
 mod process;
 
 use std::ffi::{CString, OsStr, OsString};

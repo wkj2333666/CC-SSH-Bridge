@@ -19,8 +19,8 @@ This repository ports `wkj2333666/Codex-SSH-Bridge` to Claude Code in dependency
 
 | Batch | Upstream capability | Status |
 |---|---|---|
-| 1 | Public `remote_run` shell contract: Bash by default, explicit `sh`, no silent fallback | In progress |
-| 2 | Bounded frames, POSIX dispatcher, and persistent per-host SSH sessions | Pending |
+| 1 | Public `remote_run` shell contract: Bash by default, explicit `sh`, no silent fallback | Complete — CI run 31599638885 |
+| 2 | Bounded frames, POSIX dispatcher, and persistent per-host SSH sessions | In progress — 2A frame codec |
 | 3 | Remote binary helper fast path and complete cross-architecture CI packaging | Pending |
 | 4 | OpenSSH alias discovery, configuration v2 migration, and explicit absolute MCP paths | Pending |
 | 5 | Compact MCP results, bounded session liveness, output/RSS controls, and cache policy | Pending |
