@@ -580,9 +580,17 @@ fn resolve_paths(root: &str, values: &[String]) -> BridgeResult<Vec<RemotePath>>
 
 fn resolve_path(configured_root: &str, requested: &str) -> BridgeResult<RemotePath> {
     if requested.starts_with('/') {
-        // Absolute MCP paths are authoritative and never inherit a hidden
-        // per-host working directory.
-        RemotePath::absolute(requested)
+        // Absolute MCP paths are authoritative. During the v1 compatibility
+        // window, preserve a configured root only when the requested path is
+        // already inside it; this keeps transport pinning and relative result
+        // paths aligned. Paths outside that root are resolved from `/`.
+        match RemotePath::resolve(configured_root, requested) {
+            Ok(path) => Ok(path),
+            Err(error) if error.code == ErrorCode::PathOutsideRoot => {
+                RemotePath::absolute(requested)
+            }
+            Err(error) => Err(error),
+        }
     } else {
         // Keep the direct Rust and human CLI compatibility layer until the
         // configuration-v2 gate removes per-host roots. A missing path still
@@ -1120,5 +1128,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn absolute_paths_preserve_only_compatible_v1_roots() {
+        let inside = resolve_path("/srv/root", "/srv/root/nested/file").unwrap();
+        assert_eq!(inside.as_str(), "/srv/root/nested/file");
+        assert_eq!(inside.relative(), "nested/file");
+
+        let outside = resolve_path("/srv/root", "/var/log/app.log").unwrap();
+        assert_eq!(outside.as_str(), "/var/log/app.log");
+        assert_eq!(outside.relative(), "var/log/app.log");
     }
 }

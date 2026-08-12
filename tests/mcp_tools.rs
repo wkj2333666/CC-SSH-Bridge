@@ -1401,7 +1401,7 @@ async fn task8_dispatch_pre_cancelled_call_launches_no_ssh_process() {
     let result = tools
         .call(
             "remote_list".to_owned(),
-            json!({"host":"dev"}),
+            json!({"host":"dev", "path":remote.path()}),
             ToolCallContext {
                 cancel,
                 wire_budget: roomy_context().wire_budget,
@@ -1419,7 +1419,7 @@ async fn task8_error_rendering_is_direct_bounded_and_does_not_serialize_bridge_e
     let result = tools
         .call(
             "remote_list".to_owned(),
-            json!({"host":"not-configured"}),
+            json!({"host":"not-configured", "path":"/"}),
             roomy_context(),
         )
         .await;
