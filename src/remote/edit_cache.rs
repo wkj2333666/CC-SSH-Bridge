@@ -100,6 +100,10 @@ pub(crate) struct EditCacheConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the single-entry mutation path remains covered by cache state tests"
+)]
 pub(crate) enum MutationDisposition {
     Buffered(Generation),
     ImmediateWriteRequired,
@@ -388,6 +392,10 @@ impl EditCache {
         Ok(BatchMutationDisposition::Buffered(generations))
     }
 
+    #[allow(
+        dead_code,
+        reason = "the single-entry mutation path remains covered by cache state tests"
+    )]
     pub(crate) async fn mutate(
         self: &Arc<Self>,
         key: CacheKey,
@@ -491,6 +499,10 @@ impl EditCache {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "graceful cache shutdown is wired into MCP shutdown in batch 6F"
+    )]
     pub(crate) async fn shutdown(&self) -> Result<(), EditError> {
         let hosts = {
             let mut state = self.state.lock().await;
@@ -514,6 +526,10 @@ impl EditCache {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "cache byte accounting is consumed by the later performance gate"
+    )]
     pub(crate) async fn cached_bytes(&self) -> usize {
         self.state.lock().await.cached_bytes
     }
