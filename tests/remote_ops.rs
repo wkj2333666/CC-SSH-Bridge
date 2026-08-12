@@ -44,7 +44,7 @@ impl FixtureBridge {
     }
 
     fn absolute(&self, path: String) -> String {
-        if path.starts_with('/') {
+        if path.is_empty() || path.starts_with('/') {
             path
         } else {
             self.root.join(path).to_string_lossy().into_owned()
@@ -56,6 +56,36 @@ impl FixtureBridge {
             Some(path) => self.absolute(path),
             None => self.root.to_string_lossy().into_owned(),
         })
+    }
+
+    fn relative(&self, path: String) -> String {
+        let root = self.root.to_string_lossy();
+        path.strip_prefix(root.as_ref())
+            .and_then(|path| path.strip_prefix('/'))
+            .unwrap_or(&path)
+            .to_owned()
+    }
+
+    fn relative_error(&self, mut error: BridgeError) -> BridgeError {
+        error.details.failed_path = error
+            .details
+            .failed_path
+            .take()
+            .map(|path| self.relative(path));
+        for paths in [
+            &mut error.details.changed_paths,
+            &mut error.details.not_changed_paths,
+            &mut error.details.outcome_unknown_paths,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *paths = std::mem::take(paths)
+                .into_iter()
+                .map(|path| self.relative(path))
+                .collect();
+        }
+        error
     }
 
     fn absolute_patch(&self, patch: String) -> String {
@@ -143,7 +173,17 @@ impl FixtureBridge {
         cancel: CancellationToken,
     ) -> Result<ApplyPatchResult, BridgeError> {
         request.patch = self.absolute_patch(request.patch);
-        self.inner.apply_patch(request, cancel).await
+        match self.inner.apply_patch(request, cancel).await {
+            Ok(mut result) => {
+                result.changed_paths = result
+                    .changed_paths
+                    .into_iter()
+                    .map(|path| self.relative(path))
+                    .collect();
+                Ok(result)
+            }
+            Err(error) => Err(self.relative_error(error)),
+        }
     }
 }
 
