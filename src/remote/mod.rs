@@ -159,14 +159,14 @@ fn edit_bridge_error(error: edit_cache::EditError) -> BridgeError {
 
 impl RemoteBridge {
     pub fn new(runner: Arc<SshRunner>) -> Self {
-        let limits = runner.config().limits();
+        let edit_limits = &runner.config().limits;
         let edit_backend =
-            edit_sync::SshEditBackend::new(Arc::clone(&runner), limits.edit_cache_max_bytes);
+            edit_sync::SshEditBackend::new(Arc::clone(&runner), edit_limits.edit_cache_max_bytes);
         let edit_cache = edit_cache::EditCache::new(
             edit_cache::EditCacheConfig {
-                flush_delay: std::time::Duration::from_millis(limits.edit_flush_delay_ms),
-                flush_threshold_bytes: limits.edit_flush_threshold_bytes,
-                max_bytes: limits.edit_cache_max_bytes,
+                flush_delay: std::time::Duration::from_millis(edit_limits.edit_flush_delay_ms),
+                flush_threshold_bytes: edit_limits.edit_flush_threshold_bytes,
+                max_bytes: edit_limits.edit_cache_max_bytes,
             },
             edit_backend.clone(),
         );
