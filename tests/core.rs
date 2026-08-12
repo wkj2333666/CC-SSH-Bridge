@@ -8,7 +8,7 @@ use std::process::Command;
 use cc_ssh_bridge::config::{
     Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS,
     HostLimitOverrides, HostProfile, Limits, MAX_GLOBAL_SPOOL_QUOTA_BYTES,
-    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
+    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES, discover_ssh_aliases_from,
 };
 use cc_ssh_bridge::error::{BridgeError, ErrorCode};
 use cc_ssh_bridge::path::RemotePath;
@@ -230,6 +230,66 @@ fn config_loads_defaults_and_resolves_exact_aliases_with_overrides() {
 
     assert!(config.host("DevBox").is_err());
     assert!(config.host("devbox.example").is_err());
+}
+
+#[test]
+fn config_discovers_concrete_ssh_aliases_without_replacing_explicit_profiles() {
+    let directory = TempDir::new().unwrap();
+    let ssh_directory = directory.path().join("ssh");
+    let include_directory = ssh_directory.join("conf.d");
+    fs::create_dir_all(&include_directory).unwrap();
+    let ssh_config = ssh_directory.join("config");
+    fs::write(
+        &ssh_config,
+        r#"
+Host zeta devbox wildcard-* !excluded -option bad/alias
+  HostName example.invalid
+Include conf.d/*.conf
+"#,
+    )
+    .unwrap();
+    fs::write(
+        include_directory.join("10-aliases.conf"),
+        r#"
+Host alpha zeta
+Include ../config
+"#,
+    )
+    .unwrap();
+    fs::write(
+        include_directory.join("20-aliases.conf"),
+        "Host beta? fallback\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        discover_ssh_aliases_from(&ssh_config)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["alpha", "devbox", "fallback", "zeta"]
+    );
+
+    let explicit_root = directory.path().join("explicit-root");
+    let bridge_config = write_config(&valid_config(&explicit_root));
+    let config = Config::load_with_discovery_from(bridge_config.path(), &ssh_config).unwrap();
+
+    assert_eq!(
+        config.hosts.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["alpha", "devbox", "fallback", "zeta"]
+    );
+    let explicit = config.host("devbox").unwrap();
+    assert_eq!(explicit.profile.root, explicit_root.display().to_string());
+    assert_eq!(
+        explicit.profile.description.as_deref(),
+        Some("development box")
+    );
+    let discovered = config.host("alpha").unwrap();
+    assert_eq!(discovered.profile.root, "/");
+    assert_eq!(discovered.profile.description, None);
+    assert!(!discovered.profile.read_only);
+    assert_eq!(discovered.profile.limits, HostLimitOverrides::default());
+    assert_eq!(discovered.limits.connect_timeout_ms, 10_000);
 }
 
 #[test]
