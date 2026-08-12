@@ -6,7 +6,12 @@
 mod argv;
 #[allow(
     dead_code,
-    reason = "migration batch 2A stages the frame codec before the 2B dispatcher consumer"
+    reason = "migration batch 2B stages the dispatcher before the 2C HostSession consumer"
+)]
+mod dispatcher;
+#[allow(
+    dead_code,
+    reason = "migration batches 2A and 2B stage framing before the 2C HostSession consumer"
 )]
 mod frame;
 mod process;
