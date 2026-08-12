@@ -59,9 +59,12 @@ GitHub Actions runs formatting, Clippy, the full test suite, a release build,
 and source-package checks for pull requests and pushes to `main`.
 
 Release builds are created only from version tags, which must match the version
-in `Cargo.toml`. The workflow publishes bridge binaries for five Linux GNU/musl
-targets. Each archive also contains `remote-helpers/` with static helpers for
-`x86_64`, `aarch64`, `armv7l`, `riscv64`, `ppc64le`, and `s390x` Linux hosts.
+in `Cargo.toml`. The workflow publishes bridge binaries for eight common Linux
+GNU/musl targets. Each archive also contains `remote-helpers/` for all six
+supported remote architectures: static musl helpers for `x86_64`, `aarch64`,
+and `armv7l`, plus GNU-target helpers for `riscv64`, `ppc64le`, and `s390x`.
+When a GNU helper cannot run because the remote loader or libc is incompatible,
+the bridge falls back during startup to the POSIX dispatcher.
 
 Keep `remote-helpers/` beside the bridge binary. The bridge probes `uname -s`
 and `uname -m`, uploads the matching helper once per SSH session, and uses the
