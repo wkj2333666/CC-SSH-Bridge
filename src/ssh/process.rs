@@ -20,8 +20,8 @@ use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    HostSession, RuntimePaths, SessionRequest, SessionResult, SshPolicy, build_ssh_argv,
-    build_ssh_g_argv,
+    HelperMode, HostSession, RuntimePaths, SessionRequest, SessionResult, SshPolicy,
+    build_ssh_argv, build_ssh_g_argv,
 };
 use crate::capability::{
     CAPABILITY_PROBE_SCRIPT, Capability, CapabilityCache, ShellKind, ShellRequest, ShellSelection,
@@ -71,6 +71,7 @@ pub struct RunResult {
     pub physical_root: String,
     pub output: CapturedOutput,
     pub remote_process_may_continue: bool,
+    pub helper_mode: HelperMode,
     pub timing: RunTiming,
 }
 
@@ -114,6 +115,7 @@ pub(crate) struct FixedRunRequest {
 pub(crate) struct FixedRunResult {
     pub capability: Arc<Capability>,
     pub shell: ShellSelection,
+    pub helper_mode: HelperMode,
     pub output: InternalCapturedOutput,
     pub elapsed_ms: u64,
     pub remote_process_may_continue: bool,
@@ -349,6 +351,7 @@ impl SshRunner {
                     host: request.host.clone(),
                     physical_root: capability.physical_root.clone(),
                     shell: shell.clone(),
+                    helper_mode: session.helper_mode(),
                 },
             )
             .await;
@@ -359,6 +362,7 @@ impl SshRunner {
             physical_root: capability.physical_root.clone(),
             output,
             remote_process_may_continue: false,
+            helper_mode: session.helper_mode(),
             timing: RunTiming {
                 preparation_ms,
                 session_ms: session_result.elapsed_ms,
@@ -777,6 +781,7 @@ impl SshRunner {
         Ok(FixedRunResult {
             capability,
             shell,
+            helper_mode: session.helper_mode(),
             output,
             elapsed_ms: session_elapsed_ms,
             remote_process_may_continue: session_remote_process_may_continue,

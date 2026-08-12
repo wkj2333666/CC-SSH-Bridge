@@ -41,6 +41,60 @@ fn session_runner(base: &TempDir, log: &std::path::Path) -> Arc<SshRunner> {
     )
 }
 
+fn persistent_session_runner(
+    base: &TempDir,
+    log: &std::path::Path,
+    install_log: &std::path::Path,
+    bytes_log: &std::path::Path,
+    machine_arch: &str,
+    persistent_fail: bool,
+) -> Arc<SshRunner> {
+    let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
+    let store = Arc::new(OutputStore::new(&runtime).unwrap());
+    let remote_home = base.path().join("remote-home");
+    fs::create_dir_all(&remote_home).unwrap();
+    let environment = BTreeMap::from([
+        (
+            OsString::from("FAKE_SSH_MODE"),
+            OsString::from("local-fixed"),
+        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
+        (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
+        (
+            OsString::from("FAKE_SSH_KERNEL_NAME"),
+            OsString::from("Linux"),
+        ),
+        (
+            OsString::from("FAKE_SSH_MACHINE_ARCH"),
+            OsString::from(machine_arch),
+        ),
+        (OsString::from("HOME"), remote_home.into_os_string()),
+        (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
+        (
+            OsString::from("FAKE_SSH_INSTALL_LOG"),
+            install_log.as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("FAKE_SSH_HELPER_BYTES_LOG"),
+            bytes_log.as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("FAKE_SSH_PERSISTENT_FAIL"),
+            OsString::from(if persistent_fail { "1" } else { "0" }),
+        ),
+    ]);
+    Arc::new(
+        SshRunner::with_executable(
+            Arc::new(config_with_host("dev", "/tmp")),
+            runtime,
+            store,
+            support::fake_ssh_path(),
+            environment,
+        )
+        .unwrap(),
+    )
+}
+
 fn request(command: &str) -> RunRequest {
     RunRequest {
         host: "dev".to_owned(),
@@ -124,8 +178,7 @@ async fn session_preserves_large_binary_stdin_across_pipe_short_reads() {
     );
 }
 
-#[tokio::test]
-async fn supported_linux_architecture_uses_uploaded_helper_once_per_session() {
+fn install_test_helper() -> Option<(&'static str, &'static str, std::path::PathBuf)> {
     let helper_source = std::env::var("CARGO_BIN_EXE_cc-ssh-bridge-helper")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_cc_ssh_bridge_helper"))
         .map(std::path::PathBuf::from)
@@ -135,15 +188,15 @@ async fn supported_linux_architecture_uses_uploaded_helper_once_per_session() {
         });
     if !helper_source.is_file() {
         eprintln!("helper integration binary is not available; skipping");
-        return;
+        return None;
     }
-    let target = match std::env::consts::ARCH {
-        "x86_64" => "x86_64-unknown-linux-musl",
-        "aarch64" => "aarch64-unknown-linux-musl",
-        "arm" => "armv7-unknown-linux-musleabihf",
+    let (machine_arch, target) = match std::env::consts::ARCH {
+        "x86_64" => ("x86_64", "x86_64-unknown-linux-musl"),
+        "aarch64" => ("aarch64", "aarch64-unknown-linux-musl"),
+        "arm" => ("armv7l", "armv7-unknown-linux-musleabihf"),
         _ => {
             eprintln!("unsupported test architecture; skipping");
-            return;
+            return None;
         }
     };
     let test_binary_parent = std::env::current_exe()
@@ -156,25 +209,138 @@ async fn supported_linux_architecture_uses_uploaded_helper_once_per_session() {
     let helper_path = helper_directory.join(target);
     fs::copy(&helper_source, &helper_path).unwrap();
     fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o700)).unwrap();
+    Some((machine_arch, target, helper_path))
+}
+
+fn remove_test_helper(helper_path: &std::path::Path) {
+    let helper_directory = helper_path.parent().unwrap();
+    let _ = fs::remove_file(helper_path);
+    let _ = fs::remove_dir(helper_directory);
+}
+
+#[tokio::test]
+async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
+    let Some((machine_arch, target, helper_path)) = install_test_helper() else {
+        return;
+    };
 
     let base = TempDir::new().unwrap();
     let log = base.path().join("ssh.log");
-    let runner = session_runner(&base, &log);
+    let install_log = base.path().join("install.log");
+    let bytes_log = base.path().join("bytes.log");
+    let runner =
+        persistent_session_runner(&base, &log, &install_log, &bytes_log, machine_arch, false);
+    let mut first_request = request("printf helper-first");
+    first_request.timeout = Duration::from_secs(30);
     let first = runner
-        .execute(request("printf helper-first"), CancellationToken::new())
+        .execute(first_request, CancellationToken::new())
         .await
         .unwrap();
-    let second = runner
-        .execute(request("printf helper-second"), CancellationToken::new())
-        .await
-        .unwrap();
+    assert_eq!(
+        first.helper_mode,
+        cc_ssh_bridge::ssh::HelperMode::Persistent
+    );
     assert_eq!(
         String::from_utf8_lossy(&first.output.stdout.head),
         "helper-first"
     );
+    assert_eq!(fs::read_to_string(&install_log).unwrap(), "NEED\n");
+    let uploaded = fs::read_to_string(&bytes_log)
+        .unwrap()
+        .trim()
+        .parse::<u64>()
+        .unwrap();
+    assert!(uploaded > 0);
+    drop(runner);
+
+    let restart_log = base.path().join("restart-ssh.log");
+    let restart_install_log = base.path().join("restart-install.log");
+    let restart_bytes_log = base.path().join("restart-bytes.log");
+    let restarted = persistent_session_runner(
+        &base,
+        &restart_log,
+        &restart_install_log,
+        &restart_bytes_log,
+        machine_arch,
+        false,
+    );
+    let mut second_request = request("printf helper-second");
+    second_request.timeout = Duration::from_secs(30);
+    let second = restarted
+        .execute(second_request, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        second.helper_mode,
+        cc_ssh_bridge::ssh::HelperMode::Persistent
+    );
     assert_eq!(
         String::from_utf8_lossy(&second.output.stdout.head),
         "helper-second"
+    );
+    assert_eq!(fs::read_to_string(restart_install_log).unwrap(), "HIT\n");
+    assert_eq!(fs::read_to_string(restart_bytes_log).unwrap(), "0\n");
+    let installed = base
+        .path()
+        .join("remote-home/.local/share/cc-ssh-bridge/helpers")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join(target)
+        .join("helper");
+    assert_eq!(
+        fs::metadata(installed).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    drop(restarted);
+    remove_test_helper(&helper_path);
+}
+
+#[tokio::test]
+async fn persistent_startup_failure_falls_back_to_temporary_helper() {
+    let Some((machine_arch, _target, helper_path)) = install_test_helper() else {
+        return;
+    };
+    let base = TempDir::new().unwrap();
+    let log = base.path().join("ssh.log");
+    let install_log = base.path().join("install.log");
+    let bytes_log = base.path().join("bytes.log");
+    let runner =
+        persistent_session_runner(&base, &log, &install_log, &bytes_log, machine_arch, true);
+    let mut run = request("printf temporary-fallback");
+    run.timeout = Duration::from_secs(30);
+    let result = runner.execute(run, CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        result.helper_mode,
+        cc_ssh_bridge::ssh::HelperMode::Temporary
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.output.stdout.head),
+        "temporary-fallback"
+    );
+    let log_text = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        log_text.lines().filter(|line| *line == "S").count(),
+        2,
+        "{log_text}"
+    );
+    drop(runner);
+    remove_test_helper(&helper_path);
+}
+
+#[tokio::test]
+async fn unsupported_helper_architecture_uses_shell_mode() {
+    let base = TempDir::new().unwrap();
+    let log = base.path().join("ssh.log");
+    let install_log = base.path().join("install.log");
+    let bytes_log = base.path().join("bytes.log");
+    let runner = persistent_session_runner(&base, &log, &install_log, &bytes_log, "mips64", false);
+    let result = runner
+        .execute(request("printf shell-only"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.helper_mode, cc_ssh_bridge::ssh::HelperMode::Shell);
+    assert_eq!(
+        String::from_utf8_lossy(&result.output.stdout.head),
+        "shell-only"
     );
     let log_text = fs::read_to_string(log).unwrap();
     assert_eq!(
@@ -182,7 +348,4 @@ async fn supported_linux_architecture_uses_uploaded_helper_once_per_session() {
         1,
         "{log_text}"
     );
-    drop(runner);
-    let _ = fs::remove_file(helper_path);
-    let _ = fs::remove_dir(&helper_directory);
 }

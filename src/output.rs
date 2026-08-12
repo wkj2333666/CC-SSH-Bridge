@@ -24,7 +24,7 @@ use crate::config::{
     MIN_GLOBAL_SPOOL_QUOTA_BYTES,
 };
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
-use crate::ssh::RuntimePaths;
+use crate::ssh::{HelperMode, RuntimePaths};
 use crate::{MAX_FRAME_BYTES, MAX_OUTPUT_BYTES, MAX_READ_BYTES};
 
 const SPILL_THRESHOLD_BYTES: u64 = 256 * 1024;
@@ -178,6 +178,7 @@ pub(crate) struct OutputProvenance {
     pub host: String,
     pub physical_root: String,
     pub shell: ShellSelection,
+    pub helper_mode: HelperMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

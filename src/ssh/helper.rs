@@ -3,13 +3,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::capability::Capability;
-use crate::error::{BridgeError, BridgeResult};
+use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::quote::shell_word;
 
 const HELPER_DIRECTORY_ENV: &str = "CC_SSH_BRIDGE_HELPERS_DIR";
 const HELPER_DIRECTORY_NAME: &str = "remote-helpers";
 const HELPER_BOOTSTRAP_TAG: &str = "cc-ssh-helper-bootstrap-1";
+const PERSISTENT_HELPER_BOOTSTRAP_TAG: &str = "cc-ssh-persistent-helper-bootstrap-1";
 const MAX_HELPER_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const HELPER_BOOTSTRAP_SCRIPT: &str = r#"set -u
 umask 077
@@ -49,11 +51,204 @@ chmod 700 "$helper" || exit 74
 exec "$helper" --max-frame "$max_frame"
 "#;
 
+const PERSISTENT_HELPER_BOOTSTRAP_SCRIPT: &str = r#"set -u
+umask 077
+bootstrap_tag=${1-}
+max_frame=${2-}
+bridge_version=${3-}
+helper_target=${4-}
+helper_arch=${5-}
+helper_length=${6-}
+helper_sha256=${7-}
+[ "$bootstrap_tag" = cc-ssh-persistent-helper-bootstrap-1 ] || exit 64
+case "$max_frame:$helper_length" in
+    ''|*[!0-9:]*|*:*:) exit 64 ;;
+esac
+[ "$max_frame" -gt 0 ] || exit 64
+[ "$helper_length" -gt 0 ] || exit 64
+case "$bridge_version:$helper_target:$helper_arch" in
+    ''|*[!A-Za-z0-9._:-]*) exit 64 ;;
+esac
+case "$helper_sha256" in
+    ''|*[!0-9a-f]*) exit 64 ;;
+esac
+[ "${#helper_sha256}" -eq 64 ] || exit 64
+home=$(CDPATH= cd -P -- ~ 2>/dev/null && pwd -P) || exit 74
+case "$home" in /*) ;; *) exit 74 ;; esac
+root=$home/.local
+data_root=$root/share
+bridge_root=$data_root/cc-ssh-bridge
+helpers_root=$bridge_root/helpers
+version_root=$helpers_root/$bridge_version
+target_root=$version_root/$helper_target
+helper=$target_root/helper
+lock=$target_root/.install.lock
+record_status() {
+    if [ -n "${FAKE_SSH_INSTALL_LOG-}" ]; then
+        printf '%s\n' "$1" >>"$FAKE_SSH_INSTALL_LOG"
+    fi
+}
+record_bytes() {
+    if [ -n "${FAKE_SSH_HELPER_BYTES_LOG-}" ]; then
+        printf '%s\n' "$1" >>"$FAKE_SSH_HELPER_BYTES_LOG"
+    fi
+}
+mkdir -p "$target_root" 2>/dev/null || exit 74
+for directory in "$root" "$data_root" "$bridge_root" "$helpers_root" "$version_root" "$target_root"; do
+    [ -d "$directory" ] || exit 74
+    [ ! -L "$directory" ] || exit 74
+    chmod 700 "$directory" || exit 74
+done
+valid_helper() {
+    [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
+    mode=$(stat -c '%a' "$helper" 2>/dev/null || stat -f '%Lp' "$helper" 2>/dev/null) || return 1
+    [ "$mode" = 700 ] || return 1
+    size=$(wc -c <"$helper" | tr -d '[:space:]') || return 1
+    [ "$size" = "$helper_length" ] || return 1
+    digest=$(sha256sum "$helper" 2>/dev/null) || return 1
+    digest=${digest%% *}
+    [ "$digest" = "$helper_sha256" ]
+}
+lock_owned=0
+cleanup() {
+    if [ "$lock_owned" -eq 1 ]; then
+        rm -f -- "$lock/pid" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+    fi
+    rm -f "$target_root/.helper.$$.$helper_length.tmp" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+stale_lock() {
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    case "$owner" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$owner" 2>/dev/null && return 1
+    rm -f -- "$lock/pid" 2>/dev/null || return 1
+    rmdir "$lock" 2>/dev/null
+}
+wait_count=0
+while ! mkdir "$lock" 2>/dev/null; do
+    if valid_helper; then
+        record_bytes 0
+        record_status HIT
+        printf '%s\n' 'CXSB-INSTALL-1 HIT'
+        exec "$helper" --max-frame "$max_frame"
+    fi
+    if stale_lock; then
+        continue
+    fi
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -lt 30 ] || exit 73
+    sleep 1
+done
+lock_owned=1
+printf '%s\n' "$$" >"$lock/pid" || exit 74
+if valid_helper; then
+    rm -f -- "$lock/pid" 2>/dev/null || exit 74
+    rmdir "$lock" 2>/dev/null || exit 74
+    lock_owned=0
+    record_bytes 0
+    record_status HIT
+    printf '%s\n' 'CXSB-INSTALL-1 HIT'
+    exec "$helper" --max-frame "$max_frame"
+fi
+record_status NEED
+printf '%s\n' 'CXSB-INSTALL-1 NEED'
+temporary=$target_root/.helper.$$.$helper_length.tmp
+: >"$temporary" || exit 74
+read_bytes=0
+while [ "$read_bytes" -lt "$helper_length" ]; do
+    chunk=$((helper_length - read_bytes))
+    [ "$chunk" -le 65536 ] || chunk=65536
+    dd bs="$chunk" count=1 >>"$temporary" 2>/dev/null || exit 74
+    now=$(wc -c <"$temporary" | tr -d '[:space:]') || exit 74
+    case "$now" in ''|*[!0-9]*) exit 74 ;; esac
+    [ "$now" -gt "$read_bytes" ] || exit 74
+    [ "$now" -le "$helper_length" ] || exit 74
+    read_bytes=$now
+done
+[ "$read_bytes" -eq "$helper_length" ] || exit 74
+record_bytes "$read_bytes"
+digest=$(sha256sum "$temporary" 2>/dev/null) || exit 74
+digest=${digest%% *}
+[ "$digest" = "$helper_sha256" ] || exit 74
+chmod 700 "$temporary" || exit 74
+mv -f "$temporary" "$helper" || exit 74
+rm -f -- "$lock/pid" 2>/dev/null || exit 74
+rmdir "$lock" 2>/dev/null || exit 74
+lock_owned=0
+exec "$helper" --max-frame "$max_frame"
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HelperArtifact {
     pub(crate) path: PathBuf,
     pub(crate) target: &'static str,
     pub(crate) arch: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HelperIdentity {
+    pub(crate) version: String,
+    pub(crate) target: &'static str,
+    pub(crate) arch: &'static str,
+    pub(crate) length: usize,
+    pub(crate) sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapStatus {
+    Hit,
+    Need,
+}
+
+pub(crate) fn helper_identity(
+    artifact: &HelperArtifact,
+    bytes: &[u8],
+) -> BridgeResult<HelperIdentity> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_HELPER_BYTES {
+        return Err(BridgeError::invalid_config(
+            "remote helper artifact size is outside the safe bound",
+        ));
+    }
+    Ok(HelperIdentity {
+        version: BRIDGE_VERSION.to_owned(),
+        target: artifact.target,
+        arch: artifact.arch,
+        length: bytes.len(),
+        sha256: sha256_hex(bytes),
+    })
+}
+
+pub(crate) fn parse_bootstrap_status(bytes: &[u8]) -> BridgeResult<BootstrapStatus> {
+    if bytes.len() > 64 || bytes.contains(&0) {
+        return Err(BridgeError::new(
+            ErrorCode::ProtocolError,
+            "persistent helper bootstrap status is invalid",
+            false,
+        ));
+    }
+    match bytes {
+        b"CXSB-INSTALL-1 HIT\n" => Ok(BootstrapStatus::Hit),
+        b"CXSB-INSTALL-1 NEED\n" => Ok(BootstrapStatus::Need),
+        _ => Err(BridgeError::new(
+            ErrorCode::ProtocolError,
+            "persistent helper bootstrap status is invalid",
+            false,
+        )),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 pub(crate) fn helper_artifact(capability: &Capability) -> Option<HelperArtifact> {
@@ -107,6 +302,28 @@ pub(crate) fn helper_command(max_frame_bytes: usize, helper_length: usize) -> Br
     Ok(format!("sh -c {script} -- {tag} {length} {max_frame}"))
 }
 
+pub(crate) fn persistent_helper_command(
+    max_frame_bytes: usize,
+    identity: &HelperIdentity,
+) -> BridgeResult<String> {
+    if max_frame_bytes == 0 || identity.length == 0 || identity.sha256.len() != 64 {
+        return Err(BridgeError::invalid_argument(
+            "persistent helper bootstrap arguments are invalid",
+        ));
+    }
+    let script = shell_word(PERSISTENT_HELPER_BOOTSTRAP_SCRIPT)?;
+    let tag = shell_word(PERSISTENT_HELPER_BOOTSTRAP_TAG)?;
+    let max_frame = shell_word(&max_frame_bytes.to_string())?;
+    let version = shell_word(&identity.version)?;
+    let target = shell_word(identity.target)?;
+    let arch = shell_word(identity.arch)?;
+    let length = shell_word(&identity.length.to_string())?;
+    let sha256 = shell_word(&identity.sha256)?;
+    Ok(format!(
+        "sh -c {script} -- {tag} {max_frame} {version} {target} {arch} {length} {sha256}"
+    ))
+}
+
 pub(crate) fn helper_directory() -> BridgeResult<PathBuf> {
     let directory = match std::env::var_os(HELPER_DIRECTORY_ENV) {
         Some(path) if !path.is_empty() => PathBuf::from(path),
@@ -148,7 +365,10 @@ fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{helper_artifact, helper_command, helper_target_for_arch};
+    use super::{
+        BootstrapStatus, HelperArtifact, helper_artifact, helper_command, helper_identity,
+        helper_target_for_arch, parse_bootstrap_status, persistent_helper_command,
+    };
     use crate::capability::{Capability, ShellKind};
     use std::collections::BTreeMap;
 
@@ -251,5 +471,67 @@ mod tests {
         input.flush().unwrap();
         drop(input);
         assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn helper_identity_uses_exact_length_and_sha256() {
+        let artifact = HelperArtifact {
+            path: std::path::PathBuf::from("/tmp/helper"),
+            target: "x86_64-unknown-linux-musl",
+            arch: "x86_64",
+        };
+        let identity = helper_identity(&artifact, b"abc").unwrap();
+        assert_eq!(identity.length, 3);
+        assert_eq!(identity.target, "x86_64-unknown-linux-musl");
+        assert_eq!(identity.arch, "x86_64");
+        assert_eq!(
+            identity.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn bootstrap_status_accepts_only_hit_or_need() {
+        assert_eq!(
+            parse_bootstrap_status(b"CXSB-INSTALL-1 HIT\n").unwrap(),
+            BootstrapStatus::Hit
+        );
+        assert_eq!(
+            parse_bootstrap_status(b"CXSB-INSTALL-1 NEED\n").unwrap(),
+            BootstrapStatus::Need
+        );
+    }
+
+    #[test]
+    fn bootstrap_status_rejects_trailing_or_unbounded_data() {
+        for value in [
+            b"CXSB-INSTALL-1 HIT".as_slice(),
+            b"CXSB-INSTALL-1 HIT\nextra".as_slice(),
+            b"CXSB-INSTALL-1 NOPE\n".as_slice(),
+            b"CXSB-INSTALL-1 HIT\0\n".as_slice(),
+        ] {
+            let error = parse_bootstrap_status(value).unwrap_err();
+            assert_eq!(error.code, crate::error::ErrorCode::ProtocolError);
+        }
+        let oversized = [b'X'; 65];
+        let error = parse_bootstrap_status(&oversized).unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn persistent_bootstrap_contains_no_helper_bytes() {
+        let artifact = HelperArtifact {
+            path: std::path::PathBuf::from("/tmp/helper"),
+            target: "x86_64-unknown-linux-musl",
+            arch: "x86_64",
+        };
+        let identity = helper_identity(&artifact, b"binary\0payload\xff").unwrap();
+        let command = persistent_helper_command(64 * 1024, &identity).unwrap();
+        assert!(command.contains("cc-ssh-persistent-helper-bootstrap-1"));
+        assert!(command.contains(&identity.version));
+        assert!(command.contains(identity.target));
+        assert!(command.contains(&identity.sha256));
+        assert!(!command.contains("binary"));
+        assert!(!command.as_bytes().contains(&0));
     }
 }

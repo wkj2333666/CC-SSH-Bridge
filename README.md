@@ -14,7 +14,7 @@ remote sshd ── files, compilers, tests, services
 optional, human-only: local SSHFS mount over SFTP
 ```
 
-The bridge keeps one locally owned SSH session per alias. On supported Linux architectures it uploads a precompiled Rust helper once for that session; unsupported hosts use the complete transient POSIX dispatcher fallback. Neither path installs a persistent package: the server receives no Claude Code binary, API key, plugin, or bridge installation.
+The bridge keeps one locally owned SSH session per alias. On supported Linux architectures it reuses a versioned precompiled Rust helper from the remote account's private data directory, uploading it only when the exact length and SHA-256 are not already present. Startup can fall back to a temporary helper and then the complete POSIX dispatcher. The server receives no Claude Code binary, API key, plugin, MCP server, or background daemon.
 
 ## Why this design
 
@@ -67,8 +67,12 @@ When a GNU helper cannot run because the remote loader or libc is incompatible,
 the bridge falls back during startup to the POSIX dispatcher.
 
 Keep `remote-helpers/` beside the bridge binary. The bridge probes `uname -s`
-and `uname -m`, uploads the matching helper once per SSH session, and uses the
-POSIX dispatcher when the host or artifact is unsupported. For local development
+and `uname -m`, selects the matching artifact, and installs it as mode 0700 at
+`~/.local/share/cc-ssh-bridge/helpers/<bridge-version>/<target>/helper`. A
+length and SHA-256 match reuses that helper without another upload. Persistent
+startup failure falls back to a one-session temporary helper; unsupported hosts
+or artifacts use the POSIX dispatcher. Results report the selected
+`helper_mode` as `persistent`, `temporary`, or `shell`. For local development
 or a custom package, set `CC_SSH_BRIDGE_HELPERS_DIR` to a private directory
 containing executable files named by their Rust target triple.
 

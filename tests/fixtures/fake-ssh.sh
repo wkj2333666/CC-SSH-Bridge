@@ -142,6 +142,14 @@ case "$remote_command" in
         log_call S "$@"
         exec /bin/sh -c "$remote_command"
         ;;
+    *cc-ssh-persistent-helper-bootstrap-1*)
+        log_call S "$@"
+        if [ "${FAKE_SSH_PERSISTENT_FAIL:-0}" = 1 ]; then
+            printf '%s\n' 'persistent helper fixture failure' >&2
+            exit "${FAKE_SSH_PERSISTENT_FAIL_STATUS:-255}"
+        fi
+        exec /bin/sh -c "$remote_command"
+        ;;
 esac
 
 if [ -n "${FAKE_SSH_PHASE_LOG:-}" ]; then
