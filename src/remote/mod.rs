@@ -19,6 +19,11 @@ use crate::output::{
 use crate::path::RemotePath;
 use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
 
+#[allow(
+    dead_code,
+    reason = "the cache state machine is wired into RemoteBridge in batch 6C"
+)]
+mod edit_cache;
 mod metadata;
 mod patch;
 mod protocol;
