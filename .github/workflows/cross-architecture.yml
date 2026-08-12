@@ -87,15 +87,10 @@ jobs:
             2>&1 | tee cross-build.log
           cross_status=${PIPESTATUS[0]}
           if (( cross_status != 0 )); then
-            tail -n 240 cross-build.log \
-              | grep -E '^(error|warning|[[:space:]]*-->|[[:space:]]*\||[[:space:]]*=[[:space:]]*(help|note):|Caused by:)' \
-              | while IFS= read -r detail; do
-                if [[ -n "$detail" ]]; then
-                  detail="${detail//'%'/'%25'}"
-                  detail="${detail//$'\r'/'%0D'}"
-                  detail="${detail//$'\n'/'%0A'}"
-                  echo "::error file=.github/workflows/cross-architecture.yml,line=82,title=Cross build output::$TARGET: $detail"
-                fi
-              done
+            detail="$(tail -n 120 cross-build.log)"
+            detail="${detail//'%'/'%25'}"
+            detail="${detail//$'\r'/'%0D'}"
+            detail="${detail//$'\n'/'%0A'}"
+            echo "::error file=.github/workflows/cross-architecture.yml,line=82,title=Cross build output::$TARGET%0A$detail"
           fi
           exit "$cross_status"
