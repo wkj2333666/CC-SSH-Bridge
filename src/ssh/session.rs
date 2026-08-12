@@ -41,6 +41,7 @@ pub(crate) struct SessionRequest {
     pub(crate) env: std::collections::BTreeMap<String, Option<String>>,
     pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) timeout: Duration,
+    pub(crate) admission_timeout: Duration,
     pub(crate) response_timeout: Duration,
     pub(crate) stdout_limit: u64,
     pub(crate) stderr_limit: u64,
@@ -88,6 +89,7 @@ struct SessionInner {
 
 struct PendingRequest {
     started: Instant,
+    ready: Option<oneshot::Sender<()>>,
     stdout_limit: usize,
     stderr_limit: usize,
     aggregate_limit: usize,
@@ -585,10 +587,11 @@ impl HostSession {
         cancel: CancellationToken,
     ) -> BridgeResult<SessionResult> {
         let started = Instant::now();
-        let send_deadline = started + request.response_timeout;
+        let send_deadline = started + request.admission_timeout;
         let request_id = self.inner.next_request_id()?;
         let frames = build_request_frames(request_id, &request, self.inner.max_payload)?;
         let (sender, mut receiver) = oneshot::channel();
+        let (ready, mut ready_receiver) = oneshot::channel();
         let (stdout_sink, stderr_sink) = request
             .output
             .map(|output| {
@@ -600,6 +603,7 @@ impl HostSession {
             .unwrap_or((None, None));
         let pending = PendingRequest {
             started,
+            ready: Some(ready),
             stdout_limit: usize::try_from(request.stdout_limit)
                 .map_err(|_| BridgeError::invalid_argument("stdout limit is too large"))?,
             stderr_limit: usize::try_from(request.stderr_limit)
@@ -637,7 +641,26 @@ impl HostSession {
             return Err(error);
         }
 
-        // Local writer admission and remote execution are separately bounded.
+        // Admission includes the writer queue, transport, and complete remote
+        // request decoding. READY is the remote execution boundary.
+        let admission_deadline = Instant::now() + request.admission_timeout;
+        tokio::select! {
+            biased;
+            result = &mut receiver => {
+                return result.map_err(|_| transport_error(&self.inner.host, true))?;
+            }
+            result = &mut ready_receiver => {
+                result.map_err(|_| transport_error(&self.inner.host, true))?;
+            }
+            () = cancel.cancelled() => {
+                return self.abort_request(request_id, &mut receiver, false).await;
+            }
+            () = tokio::time::sleep_until(admission_deadline) => {
+                return self.abort_request(request_id, &mut receiver, true).await;
+            }
+        }
+        // Queueing and request transfer do not consume the remote command's
+        // response allowance. READY aligns this deadline with its watchdog.
         let response_deadline = Instant::now() + request.response_timeout;
         tokio::select! {
             biased;
@@ -941,7 +964,19 @@ async fn drain_stderr(mut stderr: impl AsyncRead + Unpin) {
 
 async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult<()> {
     match frame.kind {
-        FrameKind::Ready => Ok(()),
+        FrameKind::Ready => {
+            let ready = {
+                let mut pending = inner.pending.lock().await;
+                let request = pending.get_mut(&frame.request_id).ok_or_else(|| {
+                    protocol_error(&inner.host, "dispatcher returned an unknown request ID")
+                })?;
+                request.ready.take().ok_or_else(|| {
+                    protocol_error(&inner.host, "dispatcher returned duplicate READY")
+                })?
+            };
+            let _ = ready.send(());
+            Ok(())
+        }
         FrameKind::Stdout | FrameKind::Stderr => {
             let mut pending = inner.pending.lock().await;
             let request = pending.get_mut(&frame.request_id).ok_or_else(|| {
@@ -1370,6 +1405,7 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             timeout,
+            admission_timeout: timeout,
             response_timeout: timeout,
             stdout_limit: 1024,
             stderr_limit: 1024,
