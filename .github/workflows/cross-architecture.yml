@@ -78,6 +78,7 @@ jobs:
       - name: Cross-build release binaries
         shell: bash
         env:
+          CARGO_TERM_COLOR: never
           TARGET: ${{ matrix.target }}
           BINS: ${{ matrix.bins }}
         run: |
@@ -87,7 +88,7 @@ jobs:
             2>&1 | tee cross-build.log
           cross_status=${PIPESTATUS[0]}
           if (( cross_status != 0 )); then
-            detail="$(tail -n 120 cross-build.log)"
+            detail="$(tail -n 40 cross-build.log)"
             detail="${detail//'%'/'%25'}"
             detail="${detail//$'\r'/'%0D'}"
             detail="${detail//$'\n'/'%0A'}"
