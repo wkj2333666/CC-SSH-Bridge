@@ -765,7 +765,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
                 host: BASH_HOST.to_owned(),
                 command: concat!(
                     "child=\n",
-                    "cleanup() { [ -z \"$child\" ] || kill \"$child\" 2>/dev/null || :; exit 0; }\n",
+                    "cleanup() { [ -z \"$child\" ] || { kill \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; }; exit 0; }\n",
                     "trap cleanup HUP TERM INT\n",
                     "printf '%s' \"$$\" > cancel.pid\n",
                     "while :; do sleep 1 & child=$!; wait \"$child\" || :; child=; done",
@@ -801,7 +801,11 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             .expect("cancelled SSH operation did not return")
             .expect_err("cancelled SSH operation unexpectedly succeeded");
         assert_eq!(cancel_error.code, ErrorCode::Cancelled);
-        assert_eq!(cancel_error.details.remote_process_may_continue, Some(true));
+        assert_eq!(
+            cancel_error.details.remote_process_may_continue,
+            Some(false)
+        );
+        assert!(!same_process_exists(cancelled_remote_pid));
         assert!(cancel_started.elapsed() < Duration::from_millis(500));
     }
 
