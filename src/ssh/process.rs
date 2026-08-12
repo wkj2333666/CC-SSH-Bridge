@@ -295,7 +295,7 @@ impl SshRunner {
                 ));
             }
         };
-        let capture_ms = elapsed_ms(capture_started.elapsed());
+        let concurrent_ms = elapsed_ms(capture_started.elapsed());
         let remote_process_may_continue = session_result.remote_process_may_continue;
         if session_result.timed_out {
             let mut error =
@@ -332,6 +332,9 @@ impl SshRunner {
         }
         let status = session_result.status;
         let session_ms = session_result.elapsed_ms;
+        // Streaming capture overlaps the remote session. Report only the
+        // capture tail so phase timings remain additive.
+        let capture_ms = concurrent_ms.saturating_sub(session_ms);
         self.output_store
             .set_provenance(
                 &output,
