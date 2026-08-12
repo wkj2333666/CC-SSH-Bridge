@@ -302,16 +302,6 @@ impl HostSession {
             .ok_or_else(|| BridgeError::io("SSH session stderr pipe is missing"))?;
         tokio::spawn(drain_stderr(stderr));
         let mut output = BufReader::new(stdout);
-        let helper_bootstrap_profile = (!matches!(start, ConnectionStart::Shell)).then(|| {
-            crate::bridge_profile_span!(crate::profile::ProfileEvent {
-                phase: "helper_bootstrap",
-                host: Some(host.as_str()),
-                request_id: None,
-                class: Some("cold"),
-                elapsed_us: 0,
-                bytes: None,
-            })
-        });
         match &start {
             ConnectionStart::Persistent { bytes, .. } => {
                 let status = tokio::select! {
@@ -351,7 +341,6 @@ impl HostSession {
             }
             ConnectionStart::Shell => {}
         }
-        drop(helper_bootstrap_profile);
         let hello = tokio::select! {
             biased;
             () = cancel.cancelled() => {
