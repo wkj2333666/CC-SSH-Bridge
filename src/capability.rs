@@ -621,6 +621,13 @@ name' value"
         safe_parent_device=$CC_STAT_DEVICE
         safe_tmp=$(cc_mutation_mktemp "$safe_dir") || exit 1
         printf payload | cc_mutation_stage "$safe_tmp" || exit 1
+        safe_count_bytes=$safe_dir/count-bytes
+        : >"$safe_count_bytes" || exit 9
+        printf 'payload-extra' |
+            dd of="$safe_count_bytes" bs=262144 iflag=count_bytes count=7 \
+                status=none conv=notrunc oflag=nofollow || exit 1
+        [ "$(cat "$safe_count_bytes")" = payload ] || exit 1
+        rm -f -- "$safe_count_bytes" || exit 9
         cc_mutation_stat_valid "$safe_tmp" || exit 1
         safe_uid=$(id -u) || exit 1
         case "$CC_STAT_TYPE" in 8???) ;; *) exit 1 ;; esac
