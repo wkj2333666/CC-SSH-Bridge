@@ -14,7 +14,7 @@ remote sshd ── files, compilers, tests, services
 optional, human-only: local SSHFS mount over SFTP
 ```
 
-The server receives fixed POSIX scripts and user commands through ordinary SSH. The bridge keeps one locally owned SSH session per alias and streams a bounded POSIX dispatcher over it; the dispatcher is transient and never installed on the server. The server receives no Claude Code binary, API key, plugin, or persistent bridge installation.
+The bridge keeps one locally owned SSH session per alias. On supported Linux architectures it uploads a precompiled Rust helper once for that session; unsupported hosts use the complete transient POSIX dispatcher fallback. Neither path installs a persistent package: the server receives no Claude Code binary, API key, plugin, or bridge installation.
 
 ## Why this design
 
@@ -38,7 +38,7 @@ SSHFS is intentionally absent from the MCP tool list. This prevents an Agent fro
 - Optional local `sshfs` and `fusermount3` for the human mount commands.
 - Rust 1.91.1 or newer only when rebuilding.
 
-The bundled binary is native to the machine/architecture on which it was built. Rebuild and replace `bin/cc-ssh-bridge` when moving the plugin to a different local architecture. Remote server architecture is irrelevant.
+The bundled bridge binary is native to the local machine/architecture on which it was built. Rebuild and replace `bin/cc-ssh-bridge` when moving the plugin to a different local architecture. Unsupported remote architectures continue to use the POSIX dispatcher.
 
 ## Build and package locally
 
@@ -52,6 +52,22 @@ sha256sum target/release/cc-ssh-bridge bin/cc-ssh-bridge
 ```
 
 There is no Python runtime or remote build step.
+
+## CI and release builds
+
+GitHub Actions runs formatting, Clippy, the full test suite, a release build,
+and source-package checks for pull requests and pushes to `main`.
+
+Release builds are created only from version tags, which must match the version
+in `Cargo.toml`. The workflow publishes bridge binaries for five Linux GNU/musl
+targets. Each archive also contains `remote-helpers/` with static helpers for
+`x86_64`, `aarch64`, `armv7l`, `riscv64`, `ppc64le`, and `s390x` Linux hosts.
+
+Keep `remote-helpers/` beside the bridge binary. The bridge probes `uname -s`
+and `uname -m`, uploads the matching helper once per SSH session, and uses the
+POSIX dispatcher when the host or artifact is unsupported. For local development
+or a custom package, set `CC_SSH_BRIDGE_HELPERS_DIR` to a private directory
+containing executable files named by their Rust target triple.
 
 ## Configure hosts
 
