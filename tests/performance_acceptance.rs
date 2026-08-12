@@ -14,7 +14,9 @@ use cc_ssh_bridge::mcp::{
     maximum_compact_fallback_result_bytes, parse_strict_json,
 };
 use cc_ssh_bridge::output::OutputStore;
-use cc_ssh_bridge::remote::RemoteBridge;
+use cc_ssh_bridge::remote::{
+    ReadRequest, RemoteBridge, RemoteRunRequest, RunShell, WriteEncoding, WriteMode, WriteRequest,
+};
 use cc_ssh_bridge::ssh::{RuntimePaths, SshRunner};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -37,9 +39,12 @@ const FIVE_HOST_CEILING: Duration = Duration::from_millis(1_500);
 const CANCELLATION_CEILING: Duration = Duration::from_millis(250);
 const OUTPUT_RSS_CEILING_KIB: u64 = 32 * 1024;
 const WIDE_JSON_RSS_CEILING_KIB: u64 = 48 * 1024;
+const EDIT_CACHE_STEADY_RSS_CEILING_KIB: u64 = 24 * 1024;
+const EDIT_CACHE_PEAK_RSS_CEILING_KIB: u64 = 32 * 1024;
 
 struct FakeFixture {
     _runtime_base: TempDir,
+    bridge: Arc<RemoteBridge>,
     tools: RemoteMcpTools,
     log: std::path::PathBuf,
 }
@@ -85,6 +90,55 @@ fn fake_fixture(hosts: &[&str], environment: &[(&str, OsString)]) -> FakeFixture
     let bridge = Arc::new(RemoteBridge::new(runner));
     FakeFixture {
         _runtime_base: runtime_base,
+        bridge: Arc::clone(&bridge),
+        tools: RemoteMcpTools::new(bridge),
+        log,
+    }
+}
+
+fn edit_cache_fixture(
+    flush_delay_ms: u64,
+    flush_threshold_bytes: usize,
+) -> FakeFixture {
+    let runtime_base = TempDir::new().unwrap();
+    let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
+    let store = Arc::new(OutputStore::new(&runtime).unwrap());
+    let mut config = Config::default();
+    config.hosts.insert(
+        "dev".to_owned(),
+        HostProfile {
+            root: "/tmp".to_owned(),
+            description: None,
+            read_only: false,
+            limits: HostLimitOverrides::default(),
+        },
+    );
+    config.limits.edit_flush_delay_ms = flush_delay_ms;
+    config.limits.edit_flush_threshold_bytes = flush_threshold_bytes;
+    let log = runtime_base.path().join("ssh.log");
+    let fixed_environment = BTreeMap::from([
+        (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
+        (
+            OsString::from("FAKE_SSH_MODE"),
+            OsString::from("local-fixed"),
+        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
+        (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
+    ]);
+    let runner = Arc::new(
+        SshRunner::with_executable(
+            Arc::new(config),
+            runtime,
+            store,
+            support::fake_ssh_path(),
+            fixed_environment,
+        )
+        .unwrap(),
+    );
+    let bridge = Arc::new(RemoteBridge::new(runner));
+    FakeFixture {
+        _runtime_base: runtime_base,
+        bridge: Arc::clone(&bridge),
         tools: RemoteMcpTools::new(bridge),
         log,
     }
@@ -126,6 +180,240 @@ fn report_latency(label: &str, samples: &mut [Duration]) -> (Duration, Duration,
         samples.len()
     );
     (p50, p95, maximum)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task13_release_edit_cache_latency_profile() {
+    if cfg!(debug_assertions) {
+        eprintln!("Task13 edit-cache latency profile is release-only");
+        return;
+    }
+
+    let remote = TempDir::new().unwrap();
+    let fixture = edit_cache_fixture(
+        cc_ssh_bridge::config::DEFAULT_EDIT_FLUSH_DELAY_MS,
+        cc_ssh_bridge::config::DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES,
+    );
+    let path = remote.path().join("buffered.txt");
+    let started = Instant::now();
+    let first = call_json(
+        &fixture.tools,
+        "remote_write",
+        json!({
+            "host":"dev","path":path,"content":"first\n","encoding":"utf8",
+            "mode":{"kind":"create"}
+        }),
+    )
+    .await;
+    let first_miss = started.elapsed();
+    assert_eq!(first["isError"], Value::Null, "{first}");
+    assert!(!path.exists(), "first write must remain buffered");
+
+    std::fs::write(&fixture.log, b"").unwrap();
+    let mut warm_samples = Vec::with_capacity(SSH_MEASURED_CALLS);
+    for index in 0..SSH_MEASURED_CALLS {
+        let started = Instant::now();
+        let result = call_json(
+            &fixture.tools,
+            "remote_write",
+            json!({
+                "host":"dev","path":path,"content":format!("warm-{index}\n"),"encoding":"utf8",
+                "mode":{"kind":"replace"}
+            }),
+        )
+        .await;
+        warm_samples.push(started.elapsed());
+        assert_eq!(result["isError"], Value::Null, "{result}");
+    }
+    let (_, warm_p95, _) = report_latency("warm buffered edit", &mut warm_samples);
+    assert!(
+        transport_call_kinds(&fixture.log).is_empty(),
+        "warm buffered edits must not create SSH session requests"
+    );
+
+    let barrier_started = Instant::now();
+    let barrier = call_json(
+        &fixture.tools,
+        "remote_run",
+        json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
+    )
+    .await;
+    let barrier_elapsed = barrier_started.elapsed();
+    assert_eq!(barrier["structuredContent"]["exit_status"], 0, "{barrier}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "warm-119\n");
+    assert_eq!(
+        transport_call_kinds(&fixture.log)
+            .iter()
+            .filter(|kind| **kind == "C")
+            .count(),
+        2,
+        "one mutation batch plus one command must cross the helper session"
+    );
+
+    let timer_remote = TempDir::new().unwrap();
+    let timer = edit_cache_fixture(25, 1024 * 1024);
+    let timer_path = timer_remote.path().join("timer.txt");
+    let timer_started = Instant::now();
+    let result = call_json(
+        &timer.tools,
+        "remote_write",
+        json!({
+            "host":"dev","path":timer_path,"content":"timer","encoding":"utf8",
+            "mode":{"kind":"create"}
+        }),
+    )
+    .await;
+    assert_eq!(result["isError"], Value::Null, "{result}");
+    wait_for_file(&timer_path, Duration::from_secs(2)).await;
+    let timer_elapsed = timer_started.elapsed();
+
+    let threshold_remote = TempDir::new().unwrap();
+    let threshold = edit_cache_fixture(30_000, 16);
+    let threshold_path = threshold_remote.path().join("threshold.txt");
+    let threshold_started = Instant::now();
+    let result = call_json(
+        &threshold.tools,
+        "remote_write",
+        json!({
+            "host":"dev","path":threshold_path,"content":"0123456789abcdef","encoding":"utf8",
+            "mode":{"kind":"create"}
+        }),
+    )
+    .await;
+    assert_eq!(result["isError"], Value::Null, "{result}");
+    wait_for_file(&threshold_path, Duration::from_secs(2)).await;
+    let threshold_elapsed = threshold_started.elapsed();
+
+    eprintln!(
+        "Task13 edit-cache latency: first_miss={first_miss:?} warm_p95={warm_p95:?} timer_flush={timer_elapsed:?} threshold_flush={threshold_elapsed:?} barrier_flush={barrier_elapsed:?}"
+    );
+}
+
+#[test]
+fn task13_release_edit_cache_rss_fresh_child() {
+    const CHILD_ENV: &str = "CC_SSH_BRIDGE_TASK13_EDIT_CACHE_RSS_CHILD";
+    const TEST_NAME: &str = "task13_release_edit_cache_rss_fresh_child";
+    if cfg!(debug_assertions) {
+        eprintln!("Task13 edit-cache RSS acceptance is release-only");
+        return;
+    }
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(edit_cache_rss_child());
+        return;
+    }
+    run_fresh_child(CHILD_ENV, TEST_NAME, "Task13 edit-cache RSS:");
+}
+
+async fn edit_cache_rss_child() {
+    const FILES: usize = 16;
+    const FILE_BYTES: usize = 1024 * 1024;
+    let remote = TempDir::new().unwrap();
+    let fixture = edit_cache_fixture(
+        cc_ssh_bridge::config::DEFAULT_EDIT_FLUSH_DELAY_MS,
+        cc_ssh_bridge::config::DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES,
+    );
+    let warm = fixture
+        .bridge
+        .run(
+            RemoteRunRequest {
+                host: "dev".to_owned(),
+                command: ":".to_owned(),
+                cwd: Some(remote.path().to_string_lossy().into_owned()),
+                shell: RunShell::Sh,
+                timeout_ms: None,
+                stdin: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    black_box(warm);
+    let baseline = resident_kib();
+    let mut peak = baseline;
+
+    for index in 0..FILES {
+        let path = remote.path().join(format!("cache-{index:02}.txt"));
+        std::fs::write(&path, vec![b'a' + (index % 26) as u8; FILE_BYTES]).unwrap();
+        let result = fixture
+            .bridge
+            .read(
+                ReadRequest {
+                    host: "dev".to_owned(),
+                    paths: vec![path.to_string_lossy().into_owned()],
+                    start_line: Some(1),
+                    max_lines: Some(1),
+                    max_bytes: Some(FILE_BYTES),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.returned_raw_bytes, FILE_BYTES as u64);
+        black_box(result);
+        peak = peak.max(resident_kib());
+    }
+    let steady = resident_kib();
+    let steady_growth = steady.saturating_sub(baseline);
+    assert!(
+        steady_growth <= EDIT_CACHE_STEADY_RSS_CEILING_KIB,
+        "16 MiB edit cache grew RSS by {steady_growth} KiB"
+    );
+
+    let replacement = "z".repeat(FILE_BYTES);
+    fixture
+        .bridge
+        .write(
+            WriteRequest {
+                host: "dev".to_owned(),
+                path: remote
+                    .path()
+                    .join("cache-00.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+                content: replacement,
+                encoding: WriteEncoding::Utf8,
+                mode: WriteMode::Replace {
+                    expected_sha256: None,
+                },
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    peak = peak.max(resident_kib());
+    fixture
+        .bridge
+        .run(
+            RemoteRunRequest {
+                host: "dev".to_owned(),
+                command: ":".to_owned(),
+                cwd: Some(remote.path().to_string_lossy().into_owned()),
+                shell: RunShell::Sh,
+                timeout_ms: None,
+                stdin: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        peak = peak.max(resident_kib());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let retained = resident_kib();
+    let peak_growth = peak.saturating_sub(baseline);
+    assert!(
+        peak_growth < EDIT_CACHE_PEAK_RSS_CEILING_KIB,
+        "edit-cache peak RSS grew by {peak_growth} KiB"
+    );
+    eprintln!(
+        "Task13 edit-cache RSS: content={} KiB baseline={baseline} KiB steady={steady} KiB steady_growth={steady_growth} KiB peak={peak} KiB peak_growth={peak_growth} KiB retained={retained} KiB",
+        FILES * FILE_BYTES / 1024
+    );
 }
 
 fn transport_call_kinds(log: &std::path::Path) -> Vec<&'static str> {

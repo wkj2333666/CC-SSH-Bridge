@@ -130,3 +130,79 @@ jobs:
           plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
           test "$cargo_version" = "$plugin_version"
           jq -e '.mcpServers["ssh-bridge"].args == ["mcp"]' .mcp.json >/dev/null
+
+  diagnostics:
+    name: Release edit-cache diagnostics
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Restore pinned Rust toolchain cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-toolchain-${{ env.RUST_TOOLCHAIN }}-diagnostics
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+
+      - name: Restore shared Cargo dependency cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Install diagnostic dependencies
+        run: |
+          if [ ! -x /usr/bin/rg ] || [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ripgrep openssh-server
+          fi
+          sudo install -d -m 0755 /run/sshd
+
+      - name: Prepare release diagnostic binaries
+        run: |
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --no-run \
+            --test performance_acceptance \
+            --test real_ssh
+
+      - name: Gate edit-cache latency
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test performance_acceptance task13_release_edit_cache_latency_profile \
+            -- --nocapture 2>&1 | tee diagnostics/profile-edit-cache.log
+
+      - name: Gate edit-cache RSS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test performance_acceptance task13_release_edit_cache_rss_fresh_child \
+            -- --nocapture 2>&1 | tee diagnostics/rss-edit-cache.log
+
+      - name: Run required real SSH edit-cache integration
+        env:
+          CC_SSH_BRIDGE_REQUIRE_REAL_SSH: "1"
+        run: |
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test real_ssh \
+            real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellation \
+            -- --nocapture
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: edit-cache-diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
