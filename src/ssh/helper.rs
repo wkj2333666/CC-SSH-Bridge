@@ -60,22 +60,31 @@ pub(crate) fn helper_artifact(capability: &Capability) -> Option<HelperArtifact>
     if capability.kernel_name.as_deref() != Some("Linux") {
         return None;
     }
-    let (target, arch) = match capability.machine_arch.as_deref()? {
-        "x86_64" => ("x86_64-unknown-linux-musl", "x86_64"),
-        "aarch64" => ("aarch64-unknown-linux-musl", "aarch64"),
-        "armv7l" | "armv7" => ("armv7-unknown-linux-musleabihf", "armv7l"),
-        "riscv64" => ("riscv64gc-unknown-linux-musl", "riscv64"),
-        "ppc64le" => ("powerpc64le-unknown-linux-musl", "ppc64le"),
-        "s390x" => ("s390x-unknown-linux-musl", "s390x"),
-        _ => return None,
-    };
+    let (target, arch) = helper_target_for_arch(capability.machine_arch.as_deref()?)?;
     let directory = helper_directory().ok()?;
     let path = directory.join(target);
     validate_artifact_path(&directory, &path).ok()?;
     Some(HelperArtifact { path, target, arch })
 }
 
+fn helper_target_for_arch(machine_arch: &str) -> Option<(&'static str, &'static str)> {
+    match machine_arch {
+        "x86_64" => Some(("x86_64-unknown-linux-musl", "x86_64")),
+        "aarch64" => Some(("aarch64-unknown-linux-musl", "aarch64")),
+        "armv7l" | "armv7" => Some(("armv7-unknown-linux-musleabihf", "armv7l")),
+        "riscv64" => Some(("riscv64gc-unknown-linux-musl", "riscv64")),
+        "ppc64le" => Some(("powerpc64le-unknown-linux-musl", "ppc64le")),
+        "s390x" => Some(("s390x-unknown-linux-musl", "s390x")),
+        _ => None,
+    }
+}
+
 pub(crate) fn helper_bytes(artifact: &HelperArtifact) -> BridgeResult<Vec<u8>> {
+    let directory = artifact
+        .path
+        .parent()
+        .ok_or_else(|| BridgeError::invalid_config("remote helper artifact has no parent"))?;
+    validate_artifact_path(directory, &artifact.path)?;
     let metadata = fs::symlink_metadata(&artifact.path).map_err(BridgeError::io)?;
     if metadata.len() == 0 || metadata.len() > MAX_HELPER_BYTES {
         return Err(BridgeError::invalid_config(
@@ -115,9 +124,11 @@ pub(crate) fn helper_directory() -> BridgeResult<PathBuf> {
 fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
     let directory_metadata = fs::symlink_metadata(directory).map_err(BridgeError::io)?;
     let file_metadata = fs::symlink_metadata(path).map_err(BridgeError::io)?;
+    let uid = unsafe { libc::geteuid() };
     if !directory_metadata.is_dir()
         || directory_metadata.file_type().is_symlink()
         || directory_metadata.permissions().mode() & 0o022 != 0
+        || (directory_metadata.uid() != uid && directory_metadata.uid() != 0)
         || !file_metadata.is_file()
         || file_metadata.file_type().is_symlink()
         || file_metadata.permissions().mode() & 0o111 == 0
@@ -127,7 +138,6 @@ fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
             "remote helper artifact path is not a private executable",
         ));
     }
-    let uid = unsafe { libc::geteuid() };
     if file_metadata.uid() != uid && file_metadata.uid() != 0 {
         return Err(BridgeError::invalid_config(
             "remote helper artifact has an unexpected owner",
@@ -138,7 +148,7 @@ fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{helper_artifact, helper_command};
+    use super::{helper_artifact, helper_command, helper_target_for_arch};
     use crate::capability::{Capability, ShellKind};
     use std::collections::BTreeMap;
 
@@ -167,6 +177,10 @@ mod tests {
             ("ppc64le", "powerpc64le-unknown-linux-musl"),
             ("s390x", "s390x-unknown-linux-musl"),
         ] {
+            assert_eq!(
+                helper_target_for_arch(arch).map(|(target, _)| target),
+                Some(target)
+            );
             let capability = capability(Some("Linux"), Some(arch));
             let artifact = helper_artifact(&capability);
             if std::env::var_os("CC_SSH_BRIDGE_HELPERS_DIR").is_some() {
