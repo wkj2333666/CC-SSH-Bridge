@@ -14,7 +14,7 @@ remote sshd ── files, compilers, tests, services
 optional, human-only: local SSHFS mount over SFTP
 ```
 
-The server receives fixed POSIX scripts and user commands through ordinary SSH. It receives no Claude Code binary, session, API key, plugin, or persistent helper.
+The server receives fixed POSIX scripts and user commands through ordinary SSH. The bridge keeps one locally owned SSH session per alias and streams a bounded POSIX dispatcher over it; the dispatcher is transient and never installed on the server. The server receives no Claude Code binary, API key, plugin, or persistent bridge installation.
 
 ## Why this design
 
@@ -139,6 +139,8 @@ The nine MCP tools are:
 The default flow is bounded search/read → unified patch → remote verification. Calls are synchronous. Oversized detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 
 `remote_run` accepts one command string plus `shell: bash|sh|login`; omitting `shell` means Bash. Prefer POSIX syntax and request `sh` explicitly when Bash is unavailable. A Bash request fails closed instead of silently changing command meaning. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, warnings, exit status, truncation, and process-continuation uncertainty.
+
+Operational requests are multiplexed over one persistent SSH session per alias and can run concurrently up to configured capacity. Each request has an independent process group and cancellation; mutations are not implicitly serialized, so concurrent same-path calls have no ordering guarantee. If cancellation cannot be confirmed, the session is closed and the result is explicitly marked unknown rather than retried.
 
 ## Human direct CLI
 

@@ -116,7 +116,7 @@ impl HostSession {
                 "SSH session frame limit must be positive",
             ));
         }
-        let command = dispatcher_command()?;
+        let command = dispatcher_command(limits.max_frame_bytes)?;
         let argv = build_ssh_argv(&policy, &host, &command);
         let mut child_command = Command::new(executable);
         child_command
@@ -183,10 +183,14 @@ impl HostSession {
         if hello.kind == FrameKind::Error {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return Err(startup_error(
-                &host,
-                &String::from_utf8_lossy(&hello.payload),
-            ));
+            let message = String::from_utf8_lossy(&hello.payload).into_owned();
+            if message.starts_with("DISPATCHER_CAPABILITY_MISSING=") {
+                let mut error =
+                    BridgeError::new(ErrorCode::RemoteCapabilityMissing, message, false);
+                error.details.host = Some(host);
+                return Err(error);
+            }
+            return Err(startup_error(&host, &message));
         }
         if hello.kind != FrameKind::HelloAck
             || hello.request_id != 0
@@ -925,5 +929,36 @@ mod tests {
         };
         assert_eq!(error.code, crate::error::ErrorCode::ProtocolError);
         assert!(error.message.contains("dispatcher"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_chunks_streams_to_the_configured_frame_limit() {
+        let temp = TempDir::new().unwrap();
+        let mut limits = limits();
+        limits.max_frame_bytes = 4096;
+        let session = HostSession::connect_with(
+            policy(),
+            "test-host".to_owned(),
+            limits,
+            OsString::from(fake_ssh(&temp)),
+            BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let mut request = request(
+            "dd if=/dev/zero bs=4096 count=2 2>/dev/null",
+            Duration::from_secs(2),
+        );
+        request.stdout_limit = 8192;
+        request.stderr_limit = 1024;
+        let result = session
+            .execute(request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.status, 0);
+        assert_eq!(result.stdout.len(), 8192);
+        assert!(!result.stdout_truncated);
+        session.close().await.unwrap();
     }
 }

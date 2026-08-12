@@ -19,6 +19,8 @@ The configured remote root is a routing boundary, not a security sandbox. Remote
 
 No Claude Code credential, binary, plugin, MCP server, or persistent helper is placed on a server. All SSH authentication occurs in the local OpenSSH client.
 
+Operational work uses one locally owned SSH child per configured alias. The bridge streams a bounded POSIX dispatcher as the remote command and keeps it only for that SSH session; it does not install a helper in the remote filesystem. Each request is framed as data, starts a separate process group, and has independent stdout/stderr limits, timeout, and cancellation. Dispatcher startup failure is terminal for that request; there is no silent one-shot fallback.
+
 ## OpenSSH policy
 
 Every operational SSH call forces separate `-o` arguments for:
@@ -51,6 +53,8 @@ MCP paths, queries, globs, patch bodies, file content, stdin, and configured roo
 `remote_run` intentionally accepts a shell command string. The bridge safely binds the whole string into the selected remote shell, but syntax inside it still has that shell's meaning. Omitted `shell` means Bash, and a Bash request fails closed if Bash is unavailable; POSIX sh must be requested explicitly. Explicit `login` obtains the account shell from a strict, unique `getent passwd UID` record, or from one unique `/etc/passwd` record only when `getent` is absent. It rejects malformed, relative, oversized, non-regular, or non-executable paths, treats an empty passwd shell as `/bin/sh` like OpenSSH, and never trusts `$SHELL`. A fixed POSIX guard pins the root before it executes that resolved shell with the payload as data. Results and errors preserve the actual shell metadata.
 
 Local `LC_ALL=C` is forced only for bridge protocol and SSH-diagnostic phases. Raw `remote_run` does not add that override, so the bridge does not itself cause an `LC_*` `SendEnv` rule to change the user's command locale.
+
+The dispatcher is always POSIX sh and never parses a user command as its own control language. Timeout or cancellation first sends a request-level cancel. If termination cannot be confirmed, the bridge closes the persistent session and reports pending mutation outcomes as unknown rather than retrying them.
 
 All command tools are treated as mutating. A local timeout sends TERM and then KILL to the entire local SSH process group. A detached or ambiguous remote child can survive, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
 

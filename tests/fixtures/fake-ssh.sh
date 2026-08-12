@@ -132,7 +132,10 @@ done
 case "$remote_command" in
     *cc-ssh-dispatcher-1*)
         log_call S "$@"
-        exec "${FAKE_SSH_ACCOUNT_SHELL:-/bin/sh}" -c "$remote_command"
+        CC_SSH_BRIDGE_TEST_CALL_LOG=${FAKE_SSH_LOG-} \
+        CC_SSH_LOCAL_FIXED_PATH_ONCE=${FAKE_SSH_LOCAL_FIXED_PATH_ONCE-} \
+        CC_SSH_LOCAL_FIXED_PATH_MARKER=${FAKE_SSH_LOCAL_FIXED_PATH_MARKER-} \
+            exec /bin/sh -c "$remote_command"
         ;;
 esac
 

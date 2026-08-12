@@ -30,7 +30,7 @@ ssh devbox
 
 Add future servers the same way. The bridge accepts concrete OpenSSH aliases and stores no credentials. The default bridge config is `~/.config/cc-ssh-bridge/config.toml`; set `CC_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
 
-The first network operation probes the remote POSIX environment automatically. No remote bridge helper or Claude Code installation is used.
+The first operation performs local SSH identity checks and a bounded capability probe. Root observations, user commands, and fixed read/write operations then reuse one persistent SSH session per alias; the remote dispatcher is streamed over that connection and never installed on disk. No remote bridge helper or Claude Code installation is used.
 
 ## MCP tool shapes
 
@@ -64,6 +64,8 @@ Search queries are case-sensitive fixed strings, not regular expressions. Unifie
 Prefer POSIX syntax. Request Bash for arrays, `[[ ... ]]`, `source`, `pipefail`, or Bash substitutions. Always inspect result `shell.kind`, `shell.fallback`, and `warnings`; a fallback is intentionally visible to the Agent.
 
 Timeout and cancellation terminate the local SSH process group, but a detached or ambiguous remote process can remain. Check `remote_process_may_continue` before retrying.
+
+Requests are independent and concurrent up to global and per-host limits. There is no mutation lock or ordering guarantee for simultaneous writes to the same path. Timeout and cancellation first send a request-level cancel; if the dispatcher does not confirm exit within the grace period, the bridge terminates the session and reports `remote_process_may_continue: true`. Never retry a mutation with an unknown outcome.
 
 ## Retained output
 
