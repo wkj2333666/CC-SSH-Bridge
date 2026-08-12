@@ -49,6 +49,7 @@ jobs:
         env:
           CARGO_TERM_COLOR: never
         run: |
+          set +e
           set -o pipefail
           cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked -- --test-threads=1 \
             2>&1 | tee test-output.log
