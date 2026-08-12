@@ -34,7 +34,7 @@ All schemas are closed. Follow the live schema if it differs from this quick ref
 
 ## Shell and mutation safety
 
-Prefer POSIX command syntax. With `shell:"auto"`, inspect `shell.kind`, `shell.fallback`, and warnings: the actual shell can be `bash` or `sh`. Request `shell:"bash"` for Bash-only syntax; missing Bash must fail instead of silently changing meaning. Use `shell:"login"` only when the login environment is required.
+Prefer POSIX command syntax. Omitting `shell` requests Bash. Request `shell:"sh"` explicitly when Bash is unavailable; a Bash request fails instead of silently changing meaning. Inspect the actual shell and warnings, and use `shell:"login"` only when the login environment is required.
 
 Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect read-only profiles and obtain authorization for destructive or high-impact work.
 

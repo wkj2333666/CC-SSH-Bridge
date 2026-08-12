@@ -138,7 +138,7 @@ The nine MCP tools are:
 
 The default flow is bounded search/read → unified patch → remote verification. Calls are synchronous. Oversized detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 
-`remote_run` accepts one command string plus `shell: auto|bash|sh|login`. Prefer POSIX syntax. `auto` may fall back to sh; request Bash explicitly for Bash-only syntax. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, fallback flag, warnings, exit status, truncation, and process-continuation uncertainty.
+`remote_run` accepts one command string plus `shell: bash|sh|login`; omitting `shell` means Bash. Prefer POSIX syntax and request `sh` explicitly when Bash is unavailable. A Bash request fails closed instead of silently changing command meaning. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, warnings, exit status, truncation, and process-continuation uncertainty.
 
 ## Human direct CLI
 
@@ -146,7 +146,7 @@ The direct CLI accepts argv and handles shell-word encoding inside the bridge:
 
 ```bash
 ./bin/cc-ssh-bridge hosts list
-./bin/cc-ssh-bridge run devbox --cwd . --shell auto -- git status --short
+./bin/cc-ssh-bridge run devbox --cwd . --shell bash -- git status --short
 ```
 
 This is convenient for a person or a diagnostic. Model-driven work should use MCP so results remain structured and approvals follow tool annotations.

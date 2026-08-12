@@ -86,7 +86,7 @@ The human CLI accepts argv after `--` and performs the shell-word encoding insid
 ./bin/cc-ssh-bridge hosts show devbox
 ./bin/cc-ssh-bridge doctor devbox
 ./bin/cc-ssh-bridge doctor devbox --verbose-ssh
-./bin/cc-ssh-bridge run devbox --cwd . --shell auto -- git status --short
+./bin/cc-ssh-bridge run devbox --cwd . --shell bash -- git status --short
 ```
 
 The JSON result reports the physical remote root, actual shell, exit status, warnings, duration, output limits, and any retained output reference. Verbose SSH diagnostics are bounded and redact identity paths, agent sockets, commands, and credential-like values.
