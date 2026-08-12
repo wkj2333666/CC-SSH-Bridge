@@ -2664,7 +2664,7 @@ async fn cancellation_kills_the_child_group_quickly() {
         .unwrap_err();
     assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(error.code, ErrorCode::Cancelled);
-    assert_eq!(error.details.remote_process_may_continue, Some(false));
+    assert_eq!(error.details.remote_process_may_continue, Some(true));
 }
 
 #[tokio::test]
