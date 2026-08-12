@@ -24,13 +24,13 @@ Host devbox
 
 ```bash
 ssh devbox
-./bin/cc-ssh-bridge hosts add devbox --root /srv/project
+./bin/cc-ssh-bridge hosts list
 ./bin/cc-ssh-bridge doctor devbox
 ```
 
-Add future servers the same way. The bridge accepts concrete OpenSSH aliases and stores no credentials. The default bridge config is `~/.config/cc-ssh-bridge/config.toml`; set `CC_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
+Add future servers to OpenSSH config the same way. The bridge accepts concrete aliases and stores no host policy or credentials. The default version-2 bridge config is `~/.config/cc-ssh-bridge/config.toml` and contains only global operational limits; set `CC_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
 
-The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. The remote dispatcher is streamed over that connection and never installed on disk. No remote bridge helper or Claude Code installation is used. The configured root is a lexical routing boundary; remote filesystem retargeting follows ordinary server semantics.
+The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. MCP paths and command working directories are explicit absolute paths; remote filesystem retargeting follows ordinary server semantics.
 
 ## MCP tool shapes
 
@@ -85,10 +85,9 @@ The human CLI accepts argv after `--` and performs the shell-word encoding insid
 
 ```bash
 ./bin/cc-ssh-bridge hosts list
-./bin/cc-ssh-bridge hosts show devbox
 ./bin/cc-ssh-bridge doctor devbox
 ./bin/cc-ssh-bridge doctor devbox --verbose-ssh
-./bin/cc-ssh-bridge run devbox --cwd . --shell bash -- git status --short
+./bin/cc-ssh-bridge run devbox --cwd /srv/project --shell bash -- git status --short
 ```
 
 The JSON result reports the physical remote root, actual shell, exit status, warnings, duration, output limits, and any retained output reference. Verbose SSH diagnostics are bounded and redact identity paths, agent sockets, commands, and credential-like values.
@@ -98,7 +97,7 @@ The JSON result reports the physical remote root, actual shell, exit status, war
 SSHFS is optional local software and a human-only convenience:
 
 ```bash
-./bin/cc-ssh-bridge mount devbox /absolute/local/mountpoint --remote-path .
+./bin/cc-ssh-bridge mount devbox /absolute/local/mountpoint --remote-path /srv/project
 ./bin/cc-ssh-bridge mount-status /absolute/local/mountpoint
 ./bin/cc-ssh-bridge unmount /absolute/local/mountpoint
 ```

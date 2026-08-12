@@ -252,10 +252,12 @@ fn task8_binary_lifecycle_smoke_exposes_exact_surface_without_leaks() {
     std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let host_root = "/srv/BINARY_HOST_PATH_SENTINEL";
     let secret = "CONFIG_CONTENT_SENTINEL";
+    std::fs::create_dir_all(private.path().join(".ssh")).unwrap();
+    std::fs::write(private.path().join(".ssh/config"), "Host dev\n").unwrap();
     let config = write_binary_config(
         private.path(),
         &format!(
-            "[limits]\nmax_frame_bytes = 8388608\nglobal_concurrency = 3\nglobal_spool_quota_bytes = 67108864\nretention_serialization_jobs = 1\n[hosts.dev]\nroot = {host_root:?}\ndescription = {secret:?}\n"
+            "version = 2\n# {host_root}\n# {secret}\n[limits]\nmax_frame_bytes = 8388608\nglobal_spool_quota_bytes = 67108864\nretention_serialization_jobs = 1\n"
         ),
     );
     let caller_frame = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
@@ -267,6 +269,7 @@ fn task8_binary_lifecycle_smoke_exposes_exact_surface_without_leaks() {
     std::os::unix::fs::symlink(support::fake_ssh_path(), private.path().join("ssh")).unwrap();
     let mut child = binary_command(&config, private.path())
         .arg("mcp")
+        .env("HOME", private.path())
         .env("PATH", private.path())
         .env("FAKE_SSH_LOG", &ssh_log)
         .stdin(Stdio::piped())

@@ -6,9 +6,9 @@ use std::path::Path;
 use std::process::Command;
 
 use cc_ssh_bridge::config::{
-    Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS,
-    HostLimitOverrides, HostProfile, Limits, MAX_GLOBAL_SPOOL_QUOTA_BYTES,
-    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES, discover_ssh_aliases_from,
+    Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS, Limits,
+    MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
+    discover_ssh_aliases_from, migrate_v1_text,
 };
 use cc_ssh_bridge::error::{BridgeError, ErrorCode};
 use cc_ssh_bridge::path::RemotePath;
@@ -50,22 +50,67 @@ fn write_config(contents: &str) -> NamedTempFile {
     file
 }
 
-fn valid_config(root: &Path) -> String {
-    format!(
+#[test]
+fn v2_config_contains_only_global_non_admission_limits() {
+    let config: Config = toml::from_str(
         r#"
+version = 2
+[limits]
+connect_timeout_ms = 10000
+command_timeout_ms = 300000
+max_frame_bytes = 8388608
+read_chunk_bytes = 262144
+max_read_bytes = 1048576
+max_write_bytes = 4194304
+preview_bytes = 262144
+max_output_bytes = 67108864
+global_spool_quota_bytes = 536870912
+retention_serialization_jobs = 2
+"#,
+    )
+    .unwrap();
+    let rendered = toml::to_string(&config).unwrap();
+    for forbidden in [
+        "[hosts",
+        "root",
+        "description",
+        "read_only",
+        "global_concurrency",
+        "per_host_concurrency",
+    ] {
+        assert!(!rendered.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn v1_migration_preserves_limits_and_returns_explicit_aliases() {
+    const V1: &str = r#"
 version = 1
+[limits]
+command_timeout_ms = 300000
+retention_serialization_jobs = 2
+global_concurrency = 8
+per_host_concurrency = 2
+[hosts.nkai]
+root = "/home/wkj"
+[hosts.weibo]
+root = "/"
+"#;
+    let migrated = migrate_v1_text(V1).unwrap();
+    assert_eq!(migrated.config.version, 2);
+    assert_eq!(migrated.explicit_aliases, ["nkai", "weibo"]);
+    assert_eq!(migrated.config.limits.command_timeout_ms, 300_000);
+    assert_eq!(migrated.config.limits.retention_serialization_jobs, 2);
+}
 
-[hosts.devbox]
-root = {root:?}
-description = "development box"
+fn valid_config() -> &'static str {
+    r#"
+version = 2
 
-[hosts.devbox.limits]
+[limits]
 connect_timeout_ms = 2500
 max_read_bytes = 524288
-per_host_concurrency = 1
-"#,
-        root = root.display().to_string()
-    )
+"#
 }
 
 proptest! {
@@ -231,30 +276,36 @@ fn remote_absolute_paths_require_and_normalize_absolute_input() {
 }
 
 #[test]
-fn config_loads_defaults_and_resolves_exact_aliases_with_overrides() {
-    let root = TempDir::new().unwrap();
-    let file = write_config(&valid_config(root.path()));
-    let config = Config::load(file.path()).unwrap();
+fn config_loads_limits_and_discovers_exact_openssh_aliases() {
+    let file = write_config(valid_config());
+    let ssh_config = write_config(
+        r#"
+Host zeta devbox
+    HostName example.invalid
+Host wildcard-*
+Host !excluded fallback
+"#,
+    );
+    let config = Config::load_with_discovery_from(file.path(), ssh_config.path()).unwrap();
 
-    assert_eq!(config.version, 1);
-    assert_eq!(config.limits, Limits::default());
-    let host = config.host("devbox").unwrap();
-    assert_eq!(host.alias, "devbox");
-    assert_eq!(host.profile.root, root.path().display().to_string());
-    assert_eq!(host.profile.description.as_deref(), Some("development box"));
-    assert!(!host.profile.read_only);
-    assert_eq!(host.limits.connect_timeout_ms, 2_500);
-    assert_eq!(host.limits.command_timeout_ms, 300_000);
-    assert_eq!(host.limits.max_read_bytes, 512 * 1024);
-    assert_eq!(host.limits.max_write_bytes, MAX_WRITE_BYTES);
-    assert_eq!(host.limits.per_host_concurrency, 1);
-
-    assert!(config.host("DevBox").is_err());
-    assert!(config.host("devbox.example").is_err());
+    assert_eq!(config.version, 2);
+    assert_eq!(config.limits.connect_timeout_ms, 2_500);
+    assert_eq!(config.limits.max_read_bytes, 512 * 1024);
+    assert_eq!(
+        config
+            .discover_hosts()
+            .into_iter()
+            .map(|host| host.alias)
+            .collect::<Vec<_>>(),
+        ["devbox", "fallback", "zeta"]
+    );
+    assert!(config.require_discovered_alias("devbox").is_ok());
+    assert!(config.require_discovered_alias("DevBox").is_err());
+    assert!(config.require_discovered_alias("devbox.example").is_err());
 }
 
 #[test]
-fn config_discovers_concrete_ssh_aliases_without_replacing_explicit_profiles() {
+fn config_discovers_concrete_ssh_aliases_through_bounded_includes() {
     let directory = TempDir::new().unwrap();
     let ssh_directory = directory.path().join("ssh");
     let include_directory = ssh_directory.join("conf.d");
@@ -291,32 +342,28 @@ Include ../config
         ["alpha", "devbox", "fallback", "zeta"]
     );
 
-    let explicit_root = directory.path().join("explicit-root");
-    let bridge_config = write_config(&valid_config(&explicit_root));
+    let bridge_config = write_config(valid_config());
     let config = Config::load_with_discovery_from(bridge_config.path(), &ssh_config).unwrap();
 
     assert_eq!(
         config.hosts.keys().map(String::as_str).collect::<Vec<_>>(),
         ["alpha", "devbox", "fallback", "zeta"]
     );
-    let explicit = config.host("devbox").unwrap();
-    assert_eq!(explicit.profile.root, explicit_root.display().to_string());
     assert_eq!(
-        explicit.profile.description.as_deref(),
-        Some("development box")
+        config
+            .discover_hosts()
+            .into_iter()
+            .map(|host| host.alias)
+            .collect::<Vec<_>>(),
+        ["alpha", "devbox", "fallback", "zeta"]
     );
-    let discovered = config.host("alpha").unwrap();
-    assert_eq!(discovered.profile.root, "/");
-    assert_eq!(discovered.profile.description, None);
-    assert!(!discovered.profile.read_only);
-    assert_eq!(discovered.profile.limits, HostLimitOverrides::default());
-    assert_eq!(discovered.limits.connect_timeout_ms, 10_000);
+    assert_eq!(config.limits().connect_timeout_ms, 2_500);
 }
 
 #[test]
 fn config_rejects_unsupported_version_when_loading_and_saving() {
-    for version in [0, 2] {
-        let file = write_config(&format!("version = {version}\n[hosts]\n"));
+    for version in [0, 1, 3] {
+        let file = write_config(&format!("version = {version}\n"));
         let load_error = Config::load(file.path()).unwrap_err();
         assert_eq!(
             load_error.code,
@@ -351,8 +398,6 @@ fn config_defaults_match_compiled_limits() {
     assert_eq!(limits.max_write_bytes, MAX_WRITE_BYTES);
     assert_eq!(limits.preview_bytes, 256 * 1024);
     assert_eq!(limits.max_output_bytes, MAX_OUTPUT_BYTES);
-    assert_eq!(limits.global_concurrency, 8);
-    assert_eq!(limits.per_host_concurrency, 2);
 }
 
 #[test]
@@ -374,7 +419,7 @@ fn task8_spool_limit_config_defaults_and_exact_bounds_are_frozen() {
 
     for quota in [MIN_GLOBAL_SPOOL_QUOTA_BYTES, MAX_GLOBAL_SPOOL_QUOTA_BYTES] {
         let file = write_config(&format!(
-            "[limits]\nglobal_spool_quota_bytes = {quota}\nretention_serialization_jobs = 1\n[hosts]\n"
+            "version = 2\n[limits]\nglobal_spool_quota_bytes = {quota}\nretention_serialization_jobs = 1\n"
         ));
         assert!(Config::load(file.path()).is_ok(), "quota={quota}");
     }
@@ -397,60 +442,21 @@ fn task8_spool_limit_config_rejects_quota_and_job_count_outside_bounds() {
             MAX_RETENTION_SERIALIZATION_JOBS + 1
         ),
     ] {
-        let file = write_config(&format!("[limits]\n{limit}\n[hosts]\n"));
+        let file = write_config(&format!("version = 2\n[limits]\n{limit}\n"));
         let error = Config::load(file.path()).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig, "{limit}");
     }
 }
 
-fn config_with_root(root: String) -> Config {
-    Config {
-        version: 1,
-        limits: Limits::default(),
-        hosts: std::collections::BTreeMap::from([(
-            "dev".to_owned(),
-            HostProfile {
-                root,
-                description: None,
-                read_only: false,
-                limits: HostLimitOverrides::default(),
-            },
-        )]),
-    }
-}
-
 #[test]
-fn task78_configured_root_byte_bound_ascii_is_enforced_after_normalization() {
-    let exact = format!("/{}", "a".repeat(65_535));
-    assert_eq!(exact.len(), 65_536);
-    assert!(config_with_root(exact.clone()).host("dev").is_ok());
-
-    let error = config_with_root(format!("{exact}a"))
-        .host("dev")
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::InvalidConfig);
-}
-
-#[test]
-fn task78_configured_root_byte_bound_utf8_is_enforced_by_bytes() {
-    let exact = format!("/{}a", "é".repeat(32_767));
-    assert_eq!(exact.len(), 65_536);
-    assert!(exact.chars().count() < 65_536);
-    assert!(config_with_root(exact.clone()).host("dev").is_ok());
-
-    let error = config_with_root(format!("{exact}a"))
-        .host("dev")
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::InvalidConfig);
-}
-
-#[test]
-fn config_rejects_unknown_fields_at_every_toml_layer() {
+fn config_rejects_unknown_and_removed_policy_fields() {
     let cases = [
-        "unknown = true\n[hosts]\n",
-        "[limits]\nunknown = 1\n[hosts]\n",
-        "[hosts.dev]\nroot = \"/srv/dev\"\nunknown = true\n",
-        "[hosts.dev]\nroot = \"/srv/dev\"\n[hosts.dev.limits]\nunknown = 1\n",
+        "version = 2\nunknown = true\n",
+        "version = 2\n[limits]\nunknown = 1\n",
+        "version = 2\n[hosts.dev]\nroot = \"/srv/dev\"\n",
+        "version = 2\n[limits]\nglobal_concurrency = 8\n",
+        "version = 2\n[limits]\nper_host_concurrency = 2\n",
+        "version = 2\nread_only = true\n",
     ];
 
     for contents in cases {
@@ -458,28 +464,6 @@ fn config_rejects_unknown_fields_at_every_toml_layer() {
         let error = Config::load(file.path()).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig, "{contents}");
     }
-}
-
-#[test]
-fn config_rejects_invalid_aliases_and_roots() {
-    let cases = [
-        "[hosts.\"-bad\"]\nroot = \"/srv/dev\"\n",
-        "[hosts.\"bad alias\"]\nroot = \"/srv/dev\"\n",
-        "[hosts.dev]\nroot = \"relative/path\"\n",
-    ];
-
-    for contents in cases {
-        let file = write_config(contents);
-        let error = Config::load(file.path()).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidConfig, "{contents}");
-    }
-
-    let too_long = "a".repeat(129);
-    let file = write_config(&format!("[hosts.{too_long}]\nroot = \"/srv/dev\"\n"));
-    assert_eq!(
-        Config::load(file.path()).unwrap_err().code,
-        ErrorCode::InvalidConfig
-    );
 }
 
 #[test]
@@ -493,39 +477,11 @@ fn config_rejects_zero_and_over_ceiling_global_limits() {
         "max_write_bytes = 4194305",
         "preview_bytes = 1048577",
         "max_output_bytes = 67108865",
-        "global_concurrency = 33",
-        "per_host_concurrency = 9",
         "max_read_bytes = 0",
-        "global_concurrency = 0",
-        "global_concurrency = 1\nper_host_concurrency = 2",
     ];
 
     for limit in cases {
-        let file = write_config(&format!("[limits]\n{limit}\n[hosts]\n"));
-        let error = Config::load(file.path()).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidConfig, "{limit}");
-    }
-}
-
-#[test]
-fn config_rejects_zero_over_ceiling_and_over_global_host_overrides() {
-    let cases = [
-        "connect_timeout_ms = 120001",
-        "command_timeout_ms = 3600001",
-        "max_read_bytes = 1048577",
-        "max_write_bytes = 4194305",
-        "preview_bytes = 1048577",
-        "max_output_bytes = 67108865",
-        "per_host_concurrency = 9",
-        "max_read_bytes = 0",
-        "per_host_concurrency = 0",
-        "per_host_concurrency = 3",
-    ];
-
-    for limit in cases {
-        let file = write_config(&format!(
-            "[limits]\nglobal_concurrency = 2\n[hosts.dev]\nroot = \"/srv/dev\"\n[hosts.dev.limits]\n{limit}\n"
-        ));
+        let file = write_config(&format!("version = 2\n[limits]\n{limit}\n"));
         let error = Config::load(file.path()).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig, "{limit}");
     }
@@ -538,7 +494,7 @@ fn config_rejects_unsafe_modes_non_regular_files_and_symlinks() {
 
     let directory = TempDir::new().unwrap();
     let unsafe_path = directory.path().join("unsafe.toml");
-    fs::write(&unsafe_path, "[hosts]\n").unwrap();
+    fs::write(&unsafe_path, "version = 2\n").unwrap();
     fs::set_permissions(&unsafe_path, fs::Permissions::from_mode(0o620)).unwrap();
     let mode_error = Config::load(&unsafe_path).unwrap_err();
     assert_eq!(mode_error.code, ErrorCode::InvalidConfig);
@@ -553,7 +509,7 @@ fn config_rejects_unsafe_modes_non_regular_files_and_symlinks() {
     assert_eq!(file_type_error.code, ErrorCode::InvalidConfig);
 
     let target = directory.path().join("target.toml");
-    fs::write(&target, "[hosts]\n").unwrap();
+    fs::write(&target, "version = 2\n").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     let link = directory.path().join("link.toml");
     symlink(&target, &link).unwrap();
@@ -681,11 +637,15 @@ fn config_load_never_reads_a_different_inode_after_security_validation() {
     let config_path = directory.path().join("config.toml");
     let alternate_path = directory.path().join("alternate");
     let untrusted_path = directory.path().join("untrusted.toml");
-    fs::write(&config_path, "[hosts.safe]\nroot = \"/srv/safe\"\n").unwrap();
+    fs::write(
+        &config_path,
+        "version = 2\n[limits]\nconnect_timeout_ms = 10000\n",
+    )
+    .unwrap();
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(
         &untrusted_path,
-        "[hosts.untrusted]\nroot = \"/srv/untrusted\"\n",
+        "version = 2\n[limits]\nconnect_timeout_ms = 11111\n",
     )
     .unwrap();
     fs::set_permissions(&untrusted_path, fs::Permissions::from_mode(0o666)).unwrap();
@@ -708,7 +668,7 @@ fn config_load_never_reads_a_different_inode_after_security_validation() {
     let mut accepted_untrusted_inode = false;
     for _ in 0..50_000 {
         if let Ok(config) = Config::load(&config_path)
-            && config.hosts.contains_key("untrusted")
+            && config.limits.connect_timeout_ms == 11_111
         {
             accepted_untrusted_inode = true;
             break;
@@ -751,7 +711,7 @@ fn config_load_default_in_isolated_child_process() {
             assert_eq!(loaded.source.path, expected);
             assert!(!loaded.source.from_environment);
             assert_eq!(loaded.source.warning, None);
-            assert!(loaded.config.host("xdg").is_ok());
+            assert!(loaded.config.require_discovered_alias("xdg").is_ok());
         }
         "home" => {
             let expected = Path::new(&std::env::var_os("HOME").unwrap())
@@ -759,7 +719,7 @@ fn config_load_default_in_isolated_child_process() {
             assert_eq!(loaded.source.path, expected);
             assert!(!loaded.source.from_environment);
             assert_eq!(loaded.source.warning, None);
-            assert!(loaded.config.host("home").is_ok());
+            assert!(loaded.config.require_discovered_alias("home").is_ok());
         }
         unexpected => panic!("unexpected child case: {unexpected}"),
     }
@@ -769,7 +729,7 @@ fn config_load_default_in_isolated_child_process() {
 fn environment_config_path_is_marked_as_trusted_execution_authority_input() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("config.toml");
-    fs::write(&path, "[hosts]\n").unwrap();
+    fs::write(&path, "version = 2\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -793,8 +753,10 @@ fn default_config_path_prefers_xdg_then_falls_back_to_home() {
     let home_config = home.join(".config/cc-ssh-bridge/config.toml");
     fs::create_dir_all(xdg_config.parent().unwrap()).unwrap();
     fs::create_dir_all(home_config.parent().unwrap()).unwrap();
-    fs::write(&xdg_config, "[hosts.xdg]\nroot = \"/srv/xdg\"\n").unwrap();
-    fs::write(&home_config, "[hosts.home]\nroot = \"/srv/home\"\n").unwrap();
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::write(&xdg_config, "version = 2\n").unwrap();
+    fs::write(&home_config, "version = 2\n").unwrap();
+    fs::write(home.join(".ssh/config"), "Host xdg home\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -822,8 +784,7 @@ fn default_config_path_prefers_xdg_then_falls_back_to_home() {
 fn atomic_save_writes_mode_0600_and_round_trips() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let root = TempDir::new().unwrap();
-    let source = write_config(&valid_config(root.path()));
+    let source = write_config(valid_config());
     let config = Config::load(source.path()).unwrap();
     let directory = TempDir::new().unwrap();
     let destination = directory.path().join("saved.toml");
@@ -854,8 +815,7 @@ fn atomic_save_writes_mode_0600_and_round_trips() {
 
 #[test]
 fn failed_atomic_save_preserves_destination_and_leaves_no_temporary_file() {
-    let root = TempDir::new().unwrap();
-    let source = write_config(&valid_config(root.path()));
+    let source = write_config(valid_config());
     let config = Config::load(source.path()).unwrap();
     let directory = TempDir::new().unwrap();
     let destination = directory.path().join("existing-directory");

@@ -90,17 +90,15 @@ Host devbox
 
 ```bash
 ssh devbox
-./bin/cc-ssh-bridge hosts add devbox \
-  --root /srv/my-project \
-  --description "development server"
+./bin/cc-ssh-bridge hosts list
 ./bin/cc-ssh-bridge doctor devbox
 ```
 
-The bridge automatically discovers concrete aliases from `~/.ssh/config` and recursively follows bounded `Include` files. Pattern-only and negated aliases are not exposed. A discovered alias is immediately available with remote root `/`; `hosts add` creates an explicit profile when you need a narrower root, description, read-only policy, or per-host limits. Explicit profiles always take precedence over discovered defaults, and there is no five-host ceiling. The default local config is `~/.config/cc-ssh-bridge/config.toml`; [config.example.toml](config.example.toml) documents limits. It accepts exactly configuration `version = 1` and contains aliases, roots, descriptions, and limits—never credentials.
+The bridge automatically discovers concrete aliases from `~/.ssh/config` and recursively follows bounded `Include` files. Pattern-only and negated aliases are not exposed, and there is no five-host ceiling. The default local config is `~/.config/cc-ssh-bridge/config.toml`; [config.example.toml](config.example.toml) documents global operational limits. It accepts exactly configuration `version = 2`. Hosts, roots, credentials, descriptions, read-only policy, and admission-control limits are not stored there.
 
 On the first operation for an alias, the bridge resolves the local OpenSSH policy with bounded `ssh -G`, records its immutable connection identity, and probes shell/utility capabilities. The policy and capability result are cached for the lifetime of the bridge; later operations use one framed request on the already-open SSH session without another `ssh -G`, root observation, or physical-root guard. The local Unix user and that user's OpenSSH configuration remain trusted execution authority.
 
-`doctor` reports the configured root's connection-time physical path and device/inode identity as diagnostics. The configured root remains a lexical routing boundary, and ordinary remote filesystem behavior—including symlink retargeting—matches a command run directly on that server. Individual writes and patches still use expected hashes, no-follow identity checks, atomic replacement, and explicit unknown-outcome reporting.
+`doctor` reports the connection-time physical path and device/inode identity as diagnostics. MCP operations use caller-supplied absolute paths, and ordinary remote filesystem behavior—including symlink retargeting—matches a command run directly on that server. Individual writes and patches still use expected hashes, no-follow identity checks, atomic replacement, and explicit unknown-outcome reporting.
 
 `doctor devbox --verbose-ssh` also runs a bounded local OpenSSH diagnostic and redacts identity paths, agent sockets, commands, and credential-like fields.
 
