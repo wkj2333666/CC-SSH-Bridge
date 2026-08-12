@@ -55,7 +55,9 @@ jobs:
             2>&1 | tee test-output.log
           test_status=${PIPESTATUS[0]}
           if (( test_status != 0 )); then
-            tail -n 60 test-output.log | while IFS= read -r detail; do
+            tail -n 200 test-output.log \
+              | grep -E '^(test .* FAILED|---- .* stdout ----|thread .* panicked at|assertion .* failed|[[:space:]]+(left|right|note):|failures:|[[:space:]]+[[:alnum:]_]+(::[[:alnum:]_]+)+|test result: FAILED|error: test failed)' \
+              | while IFS= read -r detail; do
               if [[ -n "$detail" ]]; then
                 detail="${detail//'%'/'%25'}"
                 detail="${detail//$'\r'/'%0D'}"
