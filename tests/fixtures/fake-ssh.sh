@@ -21,16 +21,27 @@ run_fake_sleep() {
     wait "$fake_sleep_pid"
 }
 
+write_log_record() {
+    {
+        printf '%s\n' "$1"
+        shift
+        for logged_argument do
+            printf 'arg=%s\n' "$logged_argument"
+        done
+        printf '%s\n' END
+    } >>"$FAKE_SSH_LOG"
+}
+
 log_call() {
     if [ -n "${FAKE_SSH_LOG:-}" ]; then
-        {
-            printf '%s\n' "$1"
-            shift
-            for logged_argument do
-                printf 'arg=%s\n' "$logged_argument"
-            done
-            printf '%s\n' END
-        } >>"$FAKE_SSH_LOG"
+        if command -v flock >/dev/null 2>&1; then
+            (
+                flock 9
+                write_log_record "$@"
+            ) 9>"$FAKE_SSH_LOG.flock"
+        else
+            write_log_record "$@"
+        fi
     fi
 }
 
