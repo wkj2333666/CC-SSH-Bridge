@@ -259,7 +259,10 @@ fn fixture_with_options(
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(Arc::clone(&runner)),
+        root,
+    );
     (runtime_base, runner, bridge)
 }
 
@@ -341,7 +344,10 @@ fn fixture_with_patch_policy(
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(Arc::clone(&runner)),
+        root,
+    );
     (runtime_base, runner, bridge)
 }
 
@@ -2909,7 +2915,7 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
         )
         .unwrap(),
     );
-    let bridge = Arc::new(RemoteBridge::new(runner));
+    let bridge = Arc::new(RemoteBridge::new_immediate_for_transport_tests(runner));
     let baseline_rss = resident_kib();
     let stop = CancellationToken::new();
     let monitor_stop = stop.clone();
@@ -4133,7 +4139,7 @@ async fn task5_base64_is_strict_and_oversize_preflight_launches_nothing() {
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(runner);
+    let bridge = RemoteBridge::new_immediate_for_transport_tests(runner);
     let error = bridge
         .write(
             WriteRequest {
@@ -6058,7 +6064,7 @@ async fn readonly_real_mismatch_retries_exactly_once_from_the_list_script() {
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(runner);
+    let bridge = RemoteBridge::new_immediate_for_transport_tests(runner);
     let result = bridge
         .list(
             ListRequest {
@@ -6924,7 +6930,7 @@ async fn aborting_a_fixed_facade_unlinks_internal_spools_without_ttl() {
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(runner);
+    let bridge = RemoteBridge::new_immediate_for_transport_tests(runner);
     let list_path = remote.path().to_string_lossy().into_owned();
     let task = tokio::spawn(async move {
         bridge
@@ -7124,7 +7130,7 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
         )
         .unwrap(),
     );
-    let bridge = Arc::new(RemoteBridge::new(runner));
+    let bridge = Arc::new(RemoteBridge::new_immediate_for_transport_tests(runner));
 
     let encoded = STANDARD.encode(vec![b'x'; RAW_BYTES]);
     let mut sources = (0..5).map(|_| encoded.clone()).collect::<Vec<_>>();
@@ -7290,7 +7296,7 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
         )
         .unwrap(),
     );
-    let bridge = Arc::new(RemoteBridge::new(runner));
+    let bridge = Arc::new(RemoteBridge::new_immediate_for_transport_tests(runner));
     let baseline_rss = resident_kib();
     let monitor_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let monitor_peak = Arc::new(std::sync::Mutex::new((0usize, 0u64, baseline_rss, true)));
@@ -7773,7 +7779,7 @@ async fn read_hash_before_after_race_is_a_contentless_read_conflict() {
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(runner);
+    let bridge = RemoteBridge::new_immediate_for_transport_tests(runner);
     let racing_path = path.to_string_lossy().into_owned();
     let task = tokio::spawn(async move {
         bridge

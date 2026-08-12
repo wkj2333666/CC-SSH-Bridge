@@ -102,7 +102,9 @@ pub(super) async fn read(
             host: request.host.clone(),
             path: path.as_str().to_owned(),
         };
-        if let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await {
+        if bridge.edit_buffering_enabled
+            && let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await
+        {
             if operation_context.is_none() {
                 operation_context = bridge.edit_backend.context_for(&request.host).await;
             }
@@ -247,7 +249,7 @@ pub(super) async fn read(
         } else {
             hash1.to_owned()
         };
-        if !truncated {
+        if bridge.edit_buffering_enabled && !truncated {
             bridge
                 .edit_cache
                 .cache_clean_if_absent(

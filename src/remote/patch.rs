@@ -1332,6 +1332,9 @@ pub(super) async fn apply_patch(
     request: ApplyPatchRequest,
     cancel: CancellationToken,
 ) -> BridgeResult<ApplyPatchResult> {
+    if !bridge.edit_buffering_enabled {
+        return apply_patch_immediate(bridge, request, cancel).await;
+    }
     let immediate_request = request.clone();
     let ApplyPatchRequest { host, patch } = request;
     bridge.runner.config().require_discovered_alias(&host)?;
@@ -1349,6 +1352,13 @@ pub(super) async fn apply_patch(
         .collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
+    if cancel.is_cancelled() {
+        return Err(attach_preparation_progress(
+            BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
+            None,
+            &all_paths,
+        ));
+    }
     let mut prepared = Vec::with_capacity(resolved.len());
     let mut remaining_output_bytes = maximum_bytes;
     for (index, file) in resolved.into_iter().enumerate() {
