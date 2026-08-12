@@ -2011,7 +2011,7 @@ async fn selected_shell_and_remote_gnu_timeout_are_reported_and_rendered_exactly
     assert!(rendered.contains("timeout --signal=TERM --kill-after=1s"));
     assert!(rendered.contains("exec sh -c \"$2\""));
     assert!(rendered.contains("printf safe"));
-    assert!(rendered.contains("'.'"));
+    assert!(rendered.contains("'/srv/project'"));
 }
 
 #[test]
