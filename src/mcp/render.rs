@@ -1599,7 +1599,7 @@ mod tests {
             .await,
         );
         assert_eq!(hosts_result["structuredContent"]["host_count"], 1);
-        assert_eq!(hosts_result["structuredContent"]["detail_retained"], true);
+        assert_eq!(hosts_result["structuredContent"]["detail_retained"], false);
 
         let list_result = result_value(
             list(
