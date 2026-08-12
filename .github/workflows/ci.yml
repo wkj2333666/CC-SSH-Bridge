@@ -45,7 +45,23 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked -- --test-threads=1
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
+          cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked -- --test-threads=1 \
+            2>&1 | tee test-output.log
+          test_status=${PIPESTATUS[0]}
+          if (( test_status != 0 )); then
+            details="$(tail -n 120 test-output.log)"
+            details="${details:0:12000}"
+            details="${details//'%'/'%25'}"
+            details="${details//$'\r'/'%0D'}"
+            details="${details//$'\n'/'%0A'}"
+            echo "::error title=Rust test failure::$details"
+          fi
+          exit "$test_status"
 
       - name: Build release binary
         run: cargo +"$RUST_TOOLCHAIN" build --release --locked
