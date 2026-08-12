@@ -61,6 +61,12 @@ The bridge still uses the remote Bash or POSIX sh selected by capability probing
 
 The persistent session adds a fixed startup cost once per alias. Acceptance measurements must therefore separate first helper installation, cached-helper cold start, persistent-helper warm requests, temporary-helper fallback, and shell cold/warm paths on the same fixture. A long command does not block another request until the configured per-host capacity is exhausted; a session transport failure invalidates all pending requests and is not automatically retried.
 
+OpenSSH connection reuse is private to one MCP runner. A runner uses a five-second `ControlPersist` grace to bridge capability probing and persistent-helper startup, while warm commands use the already-open framed helper session. This keeps the warm path unchanged and prevents a detached master from coupling separate Claude Code tasks.
+
+Session acquisition, helper status, helper upload, and helper handshake share a bounded connection deadline. Waiting behind another initializer is also bounded. These setup deadlines apply before any command frame is submitted, so they can safely release a failed generation without replaying a mutation.
+
+Empty preview streams allocate no head or tail storage; the existing bounded buffers grow only after output arrives. This reduces retained memory for zero-output command workloads without changing output limits or rendering.
+
 SSHFS is optional because repository walks and builds can turn many small filesystem calls into network round trips. The structured tools batch list/stat/read/search work remotely and return bounded results, which reduces both latency and Agent-side context pressure.
 
 The persistent-session gates should be rerun on the target host; the following

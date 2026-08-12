@@ -1627,8 +1627,8 @@ impl PreviewSink {
         Self {
             head_capacity,
             tail_capacity: budget - head_capacity,
-            head: Vec::with_capacity(head_capacity),
-            tail: Vec::with_capacity(budget - head_capacity),
+            head: Vec::new(),
+            tail: Vec::new(),
             bytes_seen: 0,
         }
     }
@@ -1940,8 +1940,9 @@ mod tests {
 
     use super::{
         ByteQuota, CleanupTombstone, DiagnosticScanner, EntryAccounting, InternalSpoolOwner,
-        OutputStore, PendingSpool, StoredAggregateKind, StoredProvenance, cleanup_entry,
-        cleanup_paths, create_private_file, create_spool, retry_tombstones, write_all_counted,
+        OutputStore, PendingSpool, PreviewSink, StoredAggregateKind, StoredProvenance,
+        cleanup_entry, cleanup_paths, create_private_file, create_spool, retry_tombstones,
+        write_all_counted,
     };
     use crate::config::{
         MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_SPOOL_ENTRIES, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
@@ -1954,6 +1955,18 @@ mod tests {
 
     struct ErrorAfterBytes {
         remaining: usize,
+    }
+
+    #[test]
+    fn empty_preview_sinks_allocate_lazily() {
+        let empty = PreviewSink::new(1024);
+        assert_eq!(empty.head.capacity(), 0);
+        assert_eq!(empty.tail.capacity(), 0);
+
+        let mut zero_output = PreviewSink::new(1024);
+        zero_output.push(&[]);
+        assert_eq!(zero_output.head.capacity(), 0);
+        assert_eq!(zero_output.tail.capacity(), 0);
     }
 
     struct AbortDetail {

@@ -41,7 +41,7 @@ const HARDENED_OPTIONS: &[&str] = &[
     "PermitLocalCommand=no",
     "RequestTTY=no",
     "ControlMaster=auto",
-    "ControlPersist=300",
+    "ControlPersist=5",
     "ServerAliveInterval=15",
     "ServerAliveCountMax=3",
 ];
@@ -171,6 +171,40 @@ fn argv_uses_hardened_distinct_options_and_a_private_hashed_control_path() {
                 .and_then(|value| value.strip_prefix("ControlPath=")))
             .unwrap()
     );
+}
+
+#[test]
+fn control_path_is_reused_within_one_runner_and_isolated_between_runners() {
+    let base = TempDir::new().unwrap();
+    let paths = RuntimePaths::ensure_from_base(base.path()).unwrap();
+    let config = config_with_host("dev-box", "/srv/project");
+    let first = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-a",
+    )
+    .unwrap();
+    let same = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-a",
+    )
+    .unwrap();
+    let isolated = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-b",
+    )
+    .unwrap();
+
+    assert_eq!(first.control_path(), same.control_path());
+    assert_ne!(first.control_path(), isolated.control_path());
 }
 
 #[test]
@@ -1774,7 +1808,7 @@ async fn runner_caches_policy_probes_once_and_uses_hardened_ssh_g() {
         "ClearAllForwardings=yes",
         "PermitLocalCommand=no",
         "RequestTTY=no",
-        "ControlPersist=300",
+        "ControlPersist=5",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3",
     ] {

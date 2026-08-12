@@ -12,7 +12,7 @@ use tokio::io::{
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use super::dispatcher::dispatcher_command;
@@ -30,6 +30,7 @@ const CANCEL_GRACE: Duration = Duration::from_millis(200);
 const OUTPUT_FORWARD_QUEUE_CAPACITY: usize = 16;
 const OUTPUT_FORWARD_CHUNK_BYTES: usize = 64 * 1024;
 const OUTPUT_FORWARD_BACKPRESSURE_GRACE: Duration = Duration::from_millis(25);
+const STARTUP_CLEANUP_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) struct SessionRequest {
@@ -194,6 +195,39 @@ enum ConnectionStart {
     },
 }
 
+struct StartupProcessGuard {
+    process_group: i32,
+    armed: bool,
+}
+
+#[derive(Clone)]
+struct ConnectionRuntime {
+    executable: OsString,
+    environment: std::collections::BTreeMap<OsString, OsString>,
+    deadline: Instant,
+}
+
+impl StartupProcessGuard {
+    fn new(process_group: i32) -> Self {
+        Self {
+            process_group,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            signal_process_group(self.process_group, libc::SIGKILL);
+        }
+    }
+}
+
 impl ConnectionStart {
     fn helper_arch(&self) -> Option<&'static str> {
         match self {
@@ -243,16 +277,28 @@ impl HostSession {
         environment: std::collections::BTreeMap<OsString, OsString>,
         cancel: CancellationToken,
     ) -> BridgeResult<Self> {
-        Self::connect_with_mode(
+        let deadline = Instant::now() + Duration::from_millis(limits.connect_timeout_ms.max(1));
+        let timeout_host = host.clone();
+        let connect = Self::connect_with_mode(
             policy,
             host,
             limits,
-            executable,
-            environment,
-            cancel,
+            cancel.clone(),
             ConnectionStart::Shell,
-        )
-        .await
+            ConnectionRuntime {
+                executable,
+                environment,
+                deadline,
+            },
+        );
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(cancelled_error(&timeout_host, false)),
+            result = timeout_at(deadline, connect) => match result {
+                Ok(result) => result,
+                Err(_) => Err(connect_timeout_error(&timeout_host, "SSH session setup timed out")),
+            }
+        }
     }
 
     pub(crate) async fn connect_with_capability(
@@ -264,74 +310,86 @@ impl HostSession {
         capability: &Capability,
         cancel: CancellationToken,
     ) -> BridgeResult<Self> {
-        let helper = helper_artifact(capability).and_then(|artifact| {
-            helper_bytes(&artifact).ok().and_then(|bytes| {
-                helper_identity(&artifact, &bytes)
-                    .ok()
-                    .map(|identity| (artifact, bytes, identity))
-            })
-        });
-        let Some((artifact, bytes, identity)) = helper else {
-            return Self::connect_with_mode(
+        let deadline = Instant::now() + Duration::from_millis(limits.connect_timeout_ms.max(1));
+        let timeout_host = host.clone();
+        let outer_cancel = cancel.clone();
+        let connect = async move {
+            let runtime = ConnectionRuntime {
+                executable,
+                environment,
+                deadline,
+            };
+            let helper = helper_artifact(capability).and_then(|artifact| {
+                helper_bytes(&artifact).ok().and_then(|bytes| {
+                    helper_identity(&artifact, &bytes)
+                        .ok()
+                        .map(|identity| (artifact, bytes, identity))
+                })
+            });
+            let Some((artifact, bytes, identity)) = helper else {
+                return Self::connect_with_mode(
+                    policy,
+                    host,
+                    limits,
+                    cancel,
+                    ConnectionStart::Shell,
+                    runtime,
+                )
+                .await;
+            };
+            let fallback_policy = policy.clone();
+            let fallback_host = host.clone();
+            match Self::connect_with_mode(
                 policy,
                 host,
                 limits,
-                executable,
-                environment,
-                cancel,
-                ConnectionStart::Shell,
+                cancel.clone(),
+                ConnectionStart::Persistent {
+                    artifact: artifact.clone(),
+                    bytes: bytes.clone(),
+                    identity,
+                },
+                runtime.clone(),
             )
-            .await;
-        };
-        let fallback_policy = policy.clone();
-        let fallback_host = host.clone();
-        let fallback_executable = executable.clone();
-        let fallback_environment = environment.clone();
-        match Self::connect_with_mode(
-            policy,
-            host,
-            limits,
-            executable,
-            environment,
-            cancel.clone(),
-            ConnectionStart::Persistent {
-                artifact: artifact.clone(),
-                bytes: bytes.clone(),
-                identity,
-            },
-        )
-        .await
-        {
-            Ok(session) => Ok(session),
-            Err(error) if helper_startup_fallback_allowed(&error, &cancel) => {
-                match Self::connect_with_mode(
-                    fallback_policy.clone(),
-                    fallback_host.clone(),
-                    limits,
-                    fallback_executable.clone(),
-                    fallback_environment.clone(),
-                    cancel.clone(),
-                    ConnectionStart::Temporary { artifact, bytes },
-                )
-                .await
-                {
-                    Ok(session) => Ok(session),
-                    Err(error) if helper_startup_fallback_allowed(&error, &cancel) => {
-                        Self::connect_with_mode(
-                            fallback_policy,
-                            fallback_host,
-                            limits,
-                            fallback_executable,
-                            fallback_environment,
-                            cancel,
-                            ConnectionStart::Shell,
-                        )
-                        .await
+            .await
+            {
+                Ok(session) => Ok(session),
+                Err(error) if helper_startup_fallback_allowed(&error, &cancel) => {
+                    match Self::connect_with_mode(
+                        fallback_policy.clone(),
+                        fallback_host.clone(),
+                        limits,
+                        cancel.clone(),
+                        ConnectionStart::Temporary { artifact, bytes },
+                        runtime.clone(),
+                    )
+                    .await
+                    {
+                        Ok(session) => Ok(session),
+                        Err(error) if helper_startup_fallback_allowed(&error, &cancel) => {
+                            Self::connect_with_mode(
+                                fallback_policy,
+                                fallback_host,
+                                limits,
+                                cancel,
+                                ConnectionStart::Shell,
+                                runtime,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
                 }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        };
+        tokio::select! {
+            biased;
+            () = outer_cancel.cancelled() => Err(cancelled_error(&timeout_host, false)),
+            result = timeout_at(deadline, connect) => match result {
+                Ok(result) => result,
+                Err(_) => Err(connect_timeout_error(&timeout_host, "SSH session setup timed out")),
+            }
         }
     }
 
@@ -339,15 +397,17 @@ impl HostSession {
         policy: SshPolicy,
         host: String,
         limits: EffectiveLimits,
-        executable: OsString,
-        environment: std::collections::BTreeMap<OsString, OsString>,
         cancel: CancellationToken,
         start: ConnectionStart,
+        runtime: ConnectionRuntime,
     ) -> BridgeResult<Self> {
         if limits.max_frame_bytes == 0 {
             return Err(BridgeError::invalid_argument(
                 "SSH session frame limit must be positive",
             ));
+        }
+        if runtime.deadline <= Instant::now() {
+            return Err(connect_timeout_error(&host, "SSH session setup timed out"));
         }
         let helper_arch = start.helper_arch();
         let command = match &start {
@@ -360,10 +420,10 @@ impl HostSession {
             }
         };
         let argv = build_ssh_argv(&policy, &host, &command);
-        let mut child_command = Command::new(executable);
+        let mut child_command = Command::new(runtime.executable);
         child_command
             .args(argv)
-            .envs(environment)
+            .envs(runtime.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -385,6 +445,7 @@ impl HostSession {
         let process_group = child.id().ok_or_else(|| {
             BridgeError::new(ErrorCode::Io, "SSH session child has no process id", false)
         })? as i32;
+        let mut startup_guard = StartupProcessGuard::new(process_group);
         let stdout = child
             .stdout
             .take()
@@ -400,70 +461,78 @@ impl HostSession {
                 let status = tokio::select! {
                     biased;
                     () = cancel.cancelled() => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        cleanup_startup_child(&mut child, &mut startup_guard).await;
                         return Err(cancelled_error(&host, false));
                     }
-                    result = timeout(
-                        Duration::from_millis(limits.connect_timeout_ms.max(1)),
+                    result = timeout_at(
+                        runtime.deadline,
                         read_bootstrap_status_line(&mut output),
                     ) => match result {
                         Ok(Ok(status)) => status,
                         Ok(Err(error)) => {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
+                            cleanup_startup_child(&mut child, &mut startup_guard).await;
                             return Err(error);
                         }
                         Err(_) => {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                            return Err(BridgeError::new(
-                                ErrorCode::ConnectTimeout,
+                            cleanup_startup_child(&mut child, &mut startup_guard).await;
+                            return Err(connect_timeout_error(
+                                &host,
                                 "persistent helper bootstrap timed out",
-                                true,
                             ));
                         }
                     }
                 };
                 if status == BootstrapStatus::Need {
-                    write_helper_bytes(&mut child, &host, bytes).await?;
+                    write_helper_bytes(
+                        &mut child,
+                        &host,
+                        bytes,
+                        runtime.deadline,
+                        &cancel,
+                        &mut startup_guard,
+                    )
+                    .await?;
                 }
             }
             ConnectionStart::Temporary { bytes, .. } => {
-                write_helper_bytes(&mut child, &host, bytes).await?;
+                write_helper_bytes(
+                    &mut child,
+                    &host,
+                    bytes,
+                    runtime.deadline,
+                    &cancel,
+                    &mut startup_guard,
+                )
+                .await?;
             }
             ConnectionStart::Shell => {}
         }
         let hello = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                cleanup_startup_child(&mut child, &mut startup_guard).await;
                 return Err(cancelled_error(&host, false));
             }
-            result = timeout(Duration::from_millis(limits.connect_timeout_ms.max(1)), read_frame(&mut output, limits.max_frame_bytes)) => {
+            result = timeout_at(runtime.deadline, read_frame(&mut output, limits.max_frame_bytes)) => {
                 match result {
                     Ok(Ok(Some(frame))) => frame,
                     Ok(Ok(None)) => {
-                        let _ = child.wait().await;
+                        cleanup_startup_child(&mut child, &mut startup_guard).await;
                         return Err(startup_error(&host, "SSH session closed before handshake"));
                     }
                     Ok(Err(error)) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        cleanup_startup_child(&mut child, &mut startup_guard).await;
                         return Err(startup_error(&host, &error.to_string()));
                     }
                     Err(_) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        return Err(BridgeError::new(ErrorCode::ConnectTimeout, "SSH dispatcher handshake timed out", true));
+                        cleanup_startup_child(&mut child, &mut startup_guard).await;
+                        return Err(connect_timeout_error(&host, "SSH dispatcher handshake timed out"));
                     }
                 }
             }
         };
         if hello.kind == FrameKind::Error {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            cleanup_startup_child(&mut child, &mut startup_guard).await;
             let message = String::from_utf8_lossy(&hello.payload).into_owned();
             if message.starts_with("DISPATCHER_CAPABILITY_MISSING=") {
                 let mut error =
@@ -477,8 +546,7 @@ impl HostSession {
             || hello.request_id != 0
             || !valid_handshake(&hello.payload, helper_arch)
         {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            cleanup_startup_child(&mut child, &mut startup_guard).await;
             return Err(startup_error(&host, "invalid SSH dispatcher handshake"));
         }
 
@@ -507,6 +575,7 @@ impl HostSession {
         *inner.writer_task.lock().await = Some(writer_task);
         *inner.reader_task.lock().await = Some(reader_task);
         *inner.child_task.lock().await = Some(child_task);
+        startup_guard.disarm();
         Ok(Self { inner })
     }
 
@@ -516,6 +585,7 @@ impl HostSession {
         cancel: CancellationToken,
     ) -> BridgeResult<SessionResult> {
         let started = Instant::now();
+        let send_deadline = started + request.response_timeout;
         let request_id = self.inner.next_request_id()?;
         let frames = build_request_frames(request_id, &request, self.inner.max_payload)?;
         let (sender, mut receiver) = oneshot::channel();
@@ -552,18 +622,30 @@ impl HostSession {
             sender,
         };
         self.inner.pending.lock().await.insert(request_id, pending);
-        if let Err(error) = self.inner.send(Outbound { frames }).await {
+        let send = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(cancelled_error(&self.inner.host, false)),
+            result = timeout_at(send_deadline, self.inner.send(Outbound { frames })) => {
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(timeout_error(&self.inner.host, false)),
+                }
+            }
+        };
+        if let Err(error) = send {
             self.inner.pending.lock().await.remove(&request_id);
             return Err(error);
         }
 
-        let deadline = tokio::time::sleep(request.response_timeout);
-        tokio::pin!(deadline);
+        // Local writer admission and remote execution are separately bounded.
+        let response_deadline = Instant::now() + request.response_timeout;
         tokio::select! {
             biased;
             result = &mut receiver => result.map_err(|_| transport_error(&self.inner.host, true))?,
             () = cancel.cancelled() => self.abort_request(request_id, &mut receiver, false).await,
-            () = &mut deadline => self.abort_request(request_id, &mut receiver, true).await,
+            () = tokio::time::sleep_until(response_deadline) => {
+                self.abort_request(request_id, &mut receiver, true).await
+            },
         }
     }
 
@@ -573,16 +655,27 @@ impl HostSession {
         receiver: &mut oneshot::Receiver<BridgeResult<SessionResult>>,
         timed_out: bool,
     ) -> BridgeResult<SessionResult> {
-        let _ = self
-            .inner
-            .send(Outbound {
+        let cancel_delivery = timeout(
+            CANCEL_GRACE,
+            self.inner.send(Outbound {
                 frames: vec![Frame {
                     kind: FrameKind::Cancel,
                     request_id,
                     payload: Vec::new(),
                 }],
-            })
-            .await;
+            }),
+        )
+        .await;
+        if !matches!(cancel_delivery, Ok(Ok(()))) {
+            self.inner
+                .transport_failure(transport_error(&self.inner.host, true))
+                .await;
+            return Err(if timed_out {
+                timeout_error(&self.inner.host, true)
+            } else {
+                cancelled_error(&self.inner.host, true)
+            });
+        }
         match timeout(CANCEL_GRACE, receiver).await {
             Ok(Ok(_result)) => Err(if timed_out {
                 timeout_error(&self.inner.host, false)
@@ -622,22 +715,62 @@ async fn write_helper_bytes(
     child: &mut tokio::process::Child,
     host: &str,
     bytes: &[u8],
+    deadline: Instant,
+    cancel: &CancellationToken,
+    startup_guard: &mut StartupProcessGuard,
 ) -> BridgeResult<()> {
-    let stdin = child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| BridgeError::io("SSH session stdin pipe is missing"))?;
-    if let Err(error) = stdin.write_all(bytes).await {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(startup_error(host, &error.to_string()));
+    enum UploadStop {
+        Completed(std::io::Result<()>),
+        Cancelled,
+        Deadline,
     }
-    if let Err(error) = stdin.flush().await {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(startup_error(host, &error.to_string()));
+
+    let stop = {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| BridgeError::io("SSH session stdin pipe is missing"))?;
+        let upload = async {
+            stdin.write_all(bytes).await?;
+            stdin.flush().await
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => UploadStop::Cancelled,
+            result = timeout_at(deadline, upload) => match result {
+                Ok(result) => UploadStop::Completed(result),
+                Err(_) => UploadStop::Deadline,
+            }
+        }
+    };
+    match stop {
+        UploadStop::Completed(Ok(())) => Ok(()),
+        UploadStop::Completed(Err(error)) => {
+            cleanup_startup_child(child, startup_guard).await;
+            Err(startup_error(host, &error.to_string()))
+        }
+        UploadStop::Cancelled => {
+            cleanup_startup_child(child, startup_guard).await;
+            Err(cancelled_error(host, false))
+        }
+        UploadStop::Deadline => {
+            cleanup_startup_child(child, startup_guard).await;
+            Err(connect_timeout_error(host, "SSH helper upload timed out"))
+        }
     }
-    Ok(())
+}
+
+async fn cleanup_startup_child(
+    child: &mut tokio::process::Child,
+    startup_guard: &mut StartupProcessGuard,
+) {
+    signal_process_group(startup_guard.process_group, libc::SIGTERM);
+    let child_exited = timeout(STARTUP_CLEANUP_GRACE, child.wait()).await.is_ok();
+    signal_process_group(startup_guard.process_group, libc::SIGKILL);
+    if !child_exited {
+        let _ = timeout(STARTUP_CLEANUP_GRACE, child.wait()).await;
+    }
+    startup_guard.disarm();
 }
 
 async fn read_bootstrap_status_line<R: AsyncBufRead + Unpin>(
@@ -1079,7 +1212,10 @@ fn helper_startup_fallback_allowed(error: &BridgeError, cancel: &CancellationTok
     !cancel.is_cancelled()
         && !matches!(
             error.code,
-            ErrorCode::Cancelled | ErrorCode::InvalidArgument | ErrorCode::RemoteCapabilityMissing
+            ErrorCode::Cancelled
+                | ErrorCode::ConnectTimeout
+                | ErrorCode::InvalidArgument
+                | ErrorCode::RemoteCapabilityMissing
         )
 }
 
@@ -1135,13 +1271,24 @@ fn timeout_error(host: &str, may_continue: bool) -> BridgeError {
 }
 
 fn terminate_process_group(process_group: i32) {
+    signal_process_group(process_group, libc::SIGTERM);
+}
+
+fn signal_process_group(process_group: i32, signal: i32) {
     if process_group <= 0 {
         return;
     }
     // SAFETY: kill accepts a process-group ID and does not retain pointers.
     unsafe {
-        let _ = libc::kill(-process_group, libc::SIGTERM);
+        let _ = libc::kill(-process_group, signal);
     }
+}
+
+fn connect_timeout_error(host: &str, message: &str) -> BridgeError {
+    let mut error = BridgeError::new(ErrorCode::ConnectTimeout, message, true);
+    error.details.host = Some(host.to_owned());
+    error.details.remote_process_may_continue = Some(false);
+    error
 }
 
 fn elapsed_ms(duration: Duration) -> u64 {
@@ -1159,10 +1306,13 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::{Instant, sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
-    use super::{HostSession, SessionOutput, SessionRequest, parse_exit, valid_handshake};
+    use super::{
+        ConnectionRuntime, ConnectionStart, HelperArtifact, HostSession, Outbound, SessionInner,
+        SessionOutput, SessionRequest, parse_exit, valid_handshake,
+    };
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
     use crate::ssh::SshPolicy;
@@ -1414,6 +1564,82 @@ mod tests {
         };
         assert_eq!(error.code, crate::error::ErrorCode::ProtocolError);
         assert!(error.message.contains("session"));
+    }
+
+    #[tokio::test]
+    async fn helper_upload_backpressure_obeys_the_connection_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blocked-ssh");
+        fs::write(&path, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut session_limits = limits();
+        session_limits.connect_timeout_ms = 50;
+        let connect = HostSession::connect_with_mode(
+            policy(),
+            "test-host".to_owned(),
+            session_limits,
+            CancellationToken::new(),
+            ConnectionStart::Temporary {
+                artifact: HelperArtifact {
+                    path: temp.path().join("helper"),
+                    target: "x86_64-unknown-linux-musl",
+                    arch: "x86_64",
+                },
+                bytes: vec![0; 1024 * 1024],
+            },
+            ConnectionRuntime {
+                executable: OsString::from(path),
+                environment: BTreeMap::new(),
+                deadline: Instant::now() + Duration::from_millis(50),
+            },
+        );
+        let result = timeout(Duration::from_millis(300), connect)
+            .await
+            .expect("connection setup exceeded its bounded cleanup window");
+        let error = match result {
+            Ok(_) => panic!("blocked helper upload unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, crate::error::ErrorCode::ConnectTimeout);
+    }
+
+    #[tokio::test]
+    async fn blocked_cancel_delivery_closes_the_wedged_session_within_grace() {
+        let (tx, _receiver) = tokio::sync::mpsc::channel::<Outbound>(1);
+        let session = HostSession {
+            inner: Arc::new(SessionInner {
+                host: "test-host".to_owned(),
+                helper_mode: crate::ssh::HelperMode::Shell,
+                max_payload: 4096,
+                max_output_bytes: 4096,
+                tx,
+                pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                next_id: std::sync::atomic::AtomicU64::new(1),
+                closed: std::sync::atomic::AtomicBool::new(false),
+                process_group: std::sync::atomic::AtomicI32::new(0),
+                writer_task: tokio::sync::Mutex::new(None),
+                reader_task: tokio::sync::Mutex::new(None),
+                child_task: tokio::sync::Mutex::new(None),
+            }),
+        };
+        let started = Instant::now();
+        let error = session
+            .execute(
+                request("printf never-delivered", Duration::from_millis(25)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, crate::error::ErrorCode::CommandTimeout);
+        assert_eq!(error.details.remote_process_may_continue, Some(true));
+        assert!(session.is_closed());
+        assert!(session.inner.pending.lock().await.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "wedged writer recovery took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
