@@ -201,6 +201,7 @@ pub async fn search(
     match result {
         Ok(result) => {
             let engine = match result.engine {
+                SearchEngine::Native => "native",
                 SearchEngine::Rg => "rg",
                 SearchEngine::Grep => "grep",
             };
