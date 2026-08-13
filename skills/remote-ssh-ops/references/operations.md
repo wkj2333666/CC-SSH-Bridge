@@ -46,9 +46,15 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_search` | `host`, `query`, absolute `path` | `globs`, `max_results`, `binary` |
 | `remote_read` | `host`, absolute `paths` array | `start_line`, `max_lines`, `max_bytes` |
 | `remote_output_read` | `output_ref`, `stream` | `offset`, `max_bytes` |
-| `remote_apply_patch` | `host`, unified `patch` | none |
+| `remote_apply_patch` | `host`, Claude Code or unified `patch` | none |
 | `remote_write` | `host`, absolute `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
+| `remote_job_start` | `host`, `command`, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin`, `label` |
+| `remote_job_status` | `host`, `job_id` | none |
+| `remote_job_logs` | `host`, `job_id` | `stdout_offset`, `stderr_offset`, `max_bytes` |
+| `remote_job_cancel` | `host`, `job_id` | none |
+| `remote_job_list` | `host` | `max_jobs` |
+| `remote_job_delete` | `host`, `job_id` | none |
 
 `remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits.
 
@@ -61,7 +67,31 @@ or invent a flush call. If SSH disconnects or the bridge exits abnormally,
 buffered writes may fail. A synchronization failure prevents the following
 barrier operation from starting.
 
-Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers use absolute remote paths, with `/dev/null` denoting create or delete. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
+Search queries are case-sensitive fixed strings, not regular expressions. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
+
+`remote_apply_patch` accepts Claude Code's native apply-patch envelope or a
+standard unified diff. Use absolute paths in either form. `*** Move to` is
+unsupported.
+
+```text
+*** Begin Patch
+*** Update File: /srv/project/app.rs
+@@ fn old_name()
+-fn old_name() {
++fn new_name() {
+*** End Patch
+```
+
+```diff
+--- /dev/null
++++ /srv/project/new.txt
+@@ -0,0 +1 @@
++new content
+```
+
+Unified headers must name the same absolute path (or `/dev/null` for
+create/delete); conventional `a//absolute/path` and `b//absolute/path` forms
+remain accepted.
 
 ## Shell behavior
 
@@ -85,7 +115,19 @@ Timeout and cancellation send a request-level `CANCEL`. If the dispatcher does n
 
 ## Retained output
 
-Calls complete synchronously. There is no background job ID. When a result is too large for one MCP response, `detail_retained` is true and `output_ref` is a 32-character opaque reference.
+`remote_run` remains synchronous. Use `remote_job_start` for long-lived work.
+A remote job survives its initiating MCP call and Claude Code task, survives a
+bridge disconnect, and survives a local Claude Code restart.
+There is no automatic restart after a remote reboot. Keep the returned
+`job_id`; query `remote_job_status`, page `remote_job_logs`, use
+`remote_job_cancel` when needed, discover recent IDs with `remote_job_list`,
+and remove terminal records with `remote_job_delete`. If start or cancellation
+loses its response, never submit the command again blindly; first inspect the
+known ID or list durable records. Job logs use independent stdout/stderr
+offsets and do not use `remote_output_read`.
+
+For synchronous calls, when a result is too large for one MCP response,
+`detail_retained` is true and `output_ref` is a 32-character opaque reference.
 
 Page it with:
 

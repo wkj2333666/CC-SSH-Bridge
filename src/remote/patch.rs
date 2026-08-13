@@ -16,11 +16,11 @@ use super::{
     edit_bridge_error,
 };
 
-const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PATCH_FILES: usize = 32;
-const MAX_PATCH_HUNKS: usize = 4_096;
-const MAX_PATCH_BODY_LINES: usize = 100_000;
-const MAX_PATCH_PATH_BYTES: usize = 64 * 1024;
+pub(super) const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_PATCH_FILES: usize = 32;
+pub(super) const MAX_PATCH_HUNKS: usize = 4_096;
+pub(super) const MAX_PATCH_BODY_LINES: usize = 100_000;
+pub(super) const MAX_PATCH_PATH_BYTES: usize = 64 * 1024;
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
 pub(super) const SNAPSHOT_PROTOCOL_BYTES: usize = 1024;
 pub(super) const SNAPSHOT_CAPTURE_METADATA_BYTES: usize = 2048;
@@ -352,6 +352,28 @@ pub(crate) struct FilePatch {
     pub hunks: Vec<Hunk>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedFilePatch {
+    Unified(FilePatch),
+    Codex(super::codex_patch::CodexFilePatch),
+}
+
+impl ParsedFilePatch {
+    fn path(&self) -> &str {
+        match self {
+            Self::Unified(patch) => &patch.path,
+            Self::Codex(patch) => &patch.path,
+        }
+    }
+
+    fn operation(&self) -> FilePatchOperation {
+        match self {
+            Self::Unified(patch) => patch.operation,
+            Self::Codex(patch) => patch.operation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilePatchOperation {
     Create,
@@ -569,6 +591,29 @@ pub(crate) fn parse_patch(input: &str) -> BridgeResult<Vec<FilePatch>> {
     Ok(patches)
 }
 
+pub(crate) fn parse_request_patch(input: &str) -> BridgeResult<Vec<ParsedFilePatch>> {
+    if input.len() > MAX_PATCH_BYTES {
+        return Err(patch_too_large("patch exceeds the compiled byte limit"));
+    }
+    if input.as_bytes().contains(&0) {
+        return Err(invalid_patch("patch contains NUL"));
+    }
+    let input = input.trim_start_matches('\n');
+    let first = input
+        .lines()
+        .next()
+        .ok_or_else(|| invalid_patch("patch is empty"))?;
+    if first == "*** Begin Patch" {
+        return super::codex_patch::parse_codex_patch(input)
+            .map(|patches| patches.into_iter().map(ParsedFilePatch::Codex).collect());
+    }
+    if first.starts_with("--- ") {
+        return parse_patch(input)
+            .map(|patches| patches.into_iter().map(ParsedFilePatch::Unified).collect());
+    }
+    Err(invalid_patch("patch syntax is not recognized"))
+}
+
 fn parse_header_path(
     record: &str,
     header_prefix: &str,
@@ -624,7 +669,7 @@ fn validate_patch_path(path: &str) -> BridgeResult<()> {
     Ok(())
 }
 
-fn validate_absolute_patch_path(path: &str) -> BridgeResult<()> {
+pub(super) fn validate_absolute_patch_path(path: &str) -> BridgeResult<()> {
     if path.len() > MAX_PATCH_PATH_BYTES {
         return Err(patch_too_large(
             "patch path exceeds the compiled byte limit",
@@ -810,11 +855,11 @@ fn validate_no_newline_positions(hunks: &[Hunk]) -> BridgeResult<()> {
     Ok(())
 }
 
-fn invalid_patch(message: &'static str) -> BridgeError {
+pub(super) fn invalid_patch(message: &'static str) -> BridgeError {
     BridgeError::invalid_argument(message)
 }
 
-fn patch_too_large(message: &'static str) -> BridgeError {
+pub(super) fn patch_too_large(message: &'static str) -> BridgeError {
     BridgeError::new(ErrorCode::RequestTooLarge, message, false)
 }
 
@@ -1008,6 +1053,21 @@ pub(super) fn apply_file_patch(
     }
 }
 
+pub(crate) fn apply_parsed_file(
+    base: Option<(&[u8], &str)>,
+    patch: &ParsedFilePatch,
+    maximum_output_bytes: usize,
+) -> BridgeResult<PatchedFile> {
+    match patch {
+        ParsedFilePatch::Unified(patch) => apply_file_patch(base, patch, maximum_output_bytes),
+        ParsedFilePatch::Codex(patch) => super::codex_patch::apply_codex_file(
+            base.map(|(bytes, _sha256)| bytes),
+            patch,
+            maximum_output_bytes,
+        ),
+    }
+}
+
 fn range_anchor(range: HunkRange) -> BridgeResult<usize> {
     if range.count == 0 {
         Ok(range.start)
@@ -1019,13 +1079,13 @@ fn range_anchor(range: HunkRange) -> BridgeResult<usize> {
     }
 }
 
-fn write_conflict(message: &'static str) -> BridgeError {
+pub(super) fn write_conflict(message: &'static str) -> BridgeError {
     BridgeError::new(ErrorCode::WriteConflict, message, false)
 }
 
 #[derive(Debug)]
 struct ResolvedFilePatch {
-    patch: FilePatch,
+    patch: ParsedFilePatch,
     path: super::write::PreparedMutationPath,
 }
 
@@ -1063,14 +1123,14 @@ enum PreparedMutation {
 fn resolve_patch_files(
     bridge: &RemoteBridge,
     host: &str,
-    patches: Vec<FilePatch>,
+    patches: Vec<ParsedFilePatch>,
 ) -> BridgeResult<Vec<ResolvedFilePatch>> {
     patches
         .into_iter()
         .map(|patch| {
-            let failed_path = patch.path.clone();
+            let failed_path = patch.path().to_owned();
             (|| {
-                let path = super::write::prepare_patch_path(bridge, host, &patch.path)?;
+                let path = super::write::prepare_patch_path(bridge, host, patch.path())?;
                 Ok(ResolvedFilePatch { patch, path })
             })()
             .map_err(|mut error: BridgeError| {
@@ -1345,10 +1405,10 @@ pub(super) async fn apply_patch(
         ));
     }
     let payload_bytes = patch.len();
-    let patches = parse_patch(&patch)?;
+    let patches = parse_request_patch(&patch)?;
     let all_paths = patches
         .iter()
-        .map(|patch| patch.path.clone())
+        .map(|patch| patch.path().to_owned())
         .collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
@@ -1365,13 +1425,13 @@ pub(super) async fn apply_patch(
         if cancel.is_cancelled() {
             return Err(attach_preparation_progress(
                 BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
-                Some(&file.patch.path),
+                Some(file.patch.path()),
                 &all_paths,
             ));
         }
         let key = CacheKey {
             host: host.clone(),
-            path: file.patch.path.clone(),
+            path: file.patch.path().to_owned(),
         };
         let current = bridge
             .edit_cache
@@ -1379,7 +1439,7 @@ pub(super) async fn apply_patch(
             .await
             .map_err(edit_bridge_error)
             .map_err(|error| {
-                attach_preparation_progress(error, Some(&file.patch.path), &all_paths)
+                attach_preparation_progress(error, Some(file.patch.path()), &all_paths)
             })?;
         let current_hash = match &current.desired {
             DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
@@ -1392,8 +1452,8 @@ pub(super) async fn apply_patch(
             DesiredState::Deleted => None,
         };
         let output =
-            apply_file_patch(base, &file.patch, remaining_output_bytes).map_err(|error| {
-                attach_preparation_progress(error, Some(&file.patch.path), &all_paths)
+            apply_parsed_file(base, &file.patch, remaining_output_bytes).map_err(|error| {
+                attach_preparation_progress(error, Some(file.patch.path()), &all_paths)
             })?;
         let desired = match output {
             PatchedFile::Write(bytes) => {
@@ -1402,7 +1462,7 @@ pub(super) async fn apply_patch(
                     .ok_or_else(|| {
                         attach_preparation_progress(
                             patch_too_large("patch outputs exceed the aggregate write limit"),
-                            Some(&file.patch.path),
+                            Some(file.patch.path()),
                             &all_paths,
                         )
                     })?;
@@ -1462,11 +1522,11 @@ async fn apply_patch_immediate(
             "patch exceeds the effective host write limit",
         ));
     }
-    let patches = parse_patch(&patch)?;
+    let patches = parse_request_patch(&patch)?;
     drop(patch);
     let all_paths = patches
         .iter()
-        .map(|patch| patch.path.clone())
+        .map(|patch| patch.path().to_owned())
         .collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
@@ -1490,7 +1550,7 @@ async fn apply_patch_immediate(
                 .await
                 .map_err(|error| {
                     attach_optional_remote_context(
-                        attach_preparation_progress(error, Some(&file.patch.path), &all_paths),
+                        attach_preparation_progress(error, Some(file.patch.path()), &all_paths),
                         operation_context.as_ref(),
                     )
                 })?;
@@ -1500,7 +1560,7 @@ async fn apply_patch_immediate(
             return Err(attach_remote_context(
                 attach_preparation_progress(
                     BridgeError::read_conflict(),
-                    Some(&file.patch.path),
+                    Some(file.patch.path()),
                     &all_paths,
                 ),
                 &snapshot_context,
@@ -1514,7 +1574,7 @@ async fn apply_patch_immediate(
                         attach_remote_context(
                             attach_preparation_progress(
                                 patch_too_large("patch bases exceed the aggregate write limit"),
-                                Some(&file.patch.path),
+                                Some(file.patch.path()),
                                 &all_paths,
                             ),
                             &snapshot_context,
@@ -1544,8 +1604,8 @@ async fn apply_patch_immediate(
     let mut outputs = Vec::with_capacity(resolved.len());
     let mut remaining_output_bytes = maximum_bytes;
     for (file, snapshot) in resolved.into_iter().zip(snapshots) {
-        let output = apply_file_patch(snapshot.base(), &file.patch, remaining_output_bytes)
-            .map_err(|error| attach_after_snapshots(error, Some(file.patch.path.clone())))?;
+        let output = apply_parsed_file(snapshot.base(), &file.patch, remaining_output_bytes)
+            .map_err(|error| attach_after_snapshots(error, Some(file.patch.path().to_owned())))?;
         if let PatchedFile::Write(bytes) = &output {
             remaining_output_bytes =
                 remaining_output_bytes
@@ -1553,7 +1613,7 @@ async fn apply_patch_immediate(
                     .ok_or_else(|| {
                         attach_after_snapshots(
                             patch_too_large("patch outputs exceed the aggregate write limit"),
-                            Some(file.patch.path.clone()),
+                            Some(file.patch.path().to_owned()),
                         )
                     })?;
         }
@@ -1565,20 +1625,20 @@ async fn apply_patch_immediate(
     for (file, output, expected_sha256) in outputs {
         let prepared = match output {
             PatchedFile::Write(bytes) => {
-                let mode = match file.patch.operation {
+                let mode = match file.patch.operation() {
                     FilePatchOperation::Create => WriteMode::Create,
                     FilePatchOperation::Update => WriteMode::Replace { expected_sha256 },
                     FilePatchOperation::Delete => {
                         return Err(attach_after_snapshots(
                             invalid_patch("patch delete produced a write frame"),
-                            Some(file.patch.path.clone()),
+                            Some(file.patch.path().to_owned()),
                         ));
                     }
                 };
                 let content = String::from_utf8(bytes).map_err(|_| {
                     attach_after_snapshots(
                         snapshot_protocol_error("prepared patch output is not UTF-8"),
-                        Some(file.patch.path.clone()),
+                        Some(file.patch.path().to_owned()),
                     )
                 })?;
                 PreparedMutation::Write(Box::new(
@@ -1590,7 +1650,7 @@ async fn apply_patch_immediate(
                         mode,
                     )
                     .map_err(|error| {
-                        attach_after_snapshots(error, Some(file.patch.path.clone()))
+                        attach_after_snapshots(error, Some(file.patch.path().to_owned()))
                     })?,
                 ))
             }
@@ -1598,13 +1658,13 @@ async fn apply_patch_immediate(
                 let expected_sha256 = expected_sha256.ok_or_else(|| {
                     attach_after_snapshots(
                         write_conflict("patch delete has no regular base"),
-                        Some(file.patch.path.clone()),
+                        Some(file.patch.path().to_owned()),
                     )
                 })?;
                 PreparedMutation::Delete(Box::new(
                     super::write::preflight_delete_resolved(bridge, file.path, expected_sha256)
                         .map_err(|error| {
-                            attach_after_snapshots(error, Some(file.patch.path.clone()))
+                            attach_after_snapshots(error, Some(file.patch.path().to_owned()))
                         })?,
                 ))
             }
@@ -1668,6 +1728,150 @@ mod tests {
             &parsed[0],
             super::MAX_PATCH_BYTES,
         )
+    }
+
+    fn apply_request(base: Option<&[u8]>, patch: &str) -> crate::BridgeResult<super::PatchedFile> {
+        let parsed = super::parse_request_patch(patch)?;
+        assert_eq!(parsed.len(), 1);
+        let sha256 = base.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        super::apply_parsed_file(
+            base.zip(sha256.as_deref()),
+            &parsed[0],
+            super::MAX_PATCH_BYTES,
+        )
+    }
+
+    #[test]
+    fn codex_and_unified_create_produce_identical_bytes() {
+        let codex = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: /srv/repo/new.txt\n",
+            "+alpha\n",
+            "+beta\n",
+            "*** End Patch\n",
+        );
+        let unified = concat!(
+            "--- /dev/null\n",
+            "+++ /srv/repo/new.txt\n",
+            "@@ -0,0 +1,2 @@\n",
+            "+alpha\n",
+            "+beta\n",
+        );
+
+        assert_eq!(
+            apply_request(None, codex).unwrap(),
+            apply_request(None, unified).unwrap(),
+        );
+    }
+
+    #[test]
+    fn codex_update_uses_ordered_context_matching() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/a.txt\n",
+            "@@ section two\n",
+            "-old\n",
+            "+new\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"old\nsection two\nold\n"), patch).unwrap(),
+            super::PatchedFile::Write(b"old\nsection two\nnew\n".to_vec()),
+        );
+    }
+
+    #[test]
+    fn codex_pure_addition_inserts_after_context() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/a.txt\n",
+            "@@ fn target()\n",
+            "+inserted\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"fn target()\nend\n"), patch).unwrap(),
+            super::PatchedFile::Write(b"fn target()\ninserted\nend\n".to_vec()),
+        );
+    }
+
+    #[test]
+    fn codex_end_of_file_matches_only_the_final_sequence() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/a.txt\n",
+            "-repeat\n",
+            "+final\n",
+            "*** End of File\n",
+            "\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"repeat\nmiddle\nrepeat\n"), patch).unwrap(),
+            super::PatchedFile::Write(b"repeat\nmiddle\nfinal\n".to_vec()),
+        );
+    }
+
+    #[test]
+    fn codex_update_normalizes_a_missing_terminal_newline() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/a.txt\n",
+            "-old\n",
+            "+new\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"old"), patch).unwrap(),
+            super::PatchedFile::Write(b"new\n".to_vec()),
+        );
+    }
+
+    #[test]
+    fn codex_delete_matches_unified_delete() {
+        let codex = concat!(
+            "*** Begin Patch\n",
+            "*** Delete File: /srv/repo/old.txt\n",
+            "*** End Patch\n",
+        );
+        let unified = concat!(
+            "--- /srv/repo/old.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-old\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"old\n"), codex).unwrap(),
+            apply_request(Some(b"old\n"), unified).unwrap(),
+        );
+    }
+
+    #[test]
+    fn request_parser_rejects_unsupported_or_mixed_codex_syntax() {
+        for input in [
+            "*** Begin Patch\n*** Move to: /srv/repo/b\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: relative.txt\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: /srv/repo/a\n+x\n*** End Patch\ntrailing\n",
+            concat!(
+                "*** Begin Patch\n",
+                "--- /dev/null\n",
+                "+++ /srv/repo/a\n",
+                "@@ -0,0 +1 @@\n",
+                "+x\n",
+                "*** End Patch\n",
+            ),
+        ] {
+            assert_eq!(
+                super::parse_request_patch(input).unwrap_err().code,
+                ErrorCode::InvalidArgument,
+                "{input:?}",
+            );
+        }
     }
 
     #[test]

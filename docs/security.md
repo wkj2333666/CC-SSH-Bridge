@@ -60,6 +60,22 @@ The dispatcher is always POSIX sh and never parses a user command as its own con
 
 All command tools are treated as mutating. A local timeout sends a request-level cancel, then terminates the entire persistent SSH process group when the dispatcher cannot confirm completion. A detached or ambiguous remote child can survive, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
 
+## Durable remote jobs
+
+Durable remote jobs require the persistent binary helper. Each job is stored
+under `~/.local/state/cc-ssh-bridge/jobs/<job_id>/`; the store directory is mode
+`0700`, while record, request, stdout, stderr, lock, and control files are mode
+`0600`. Store traversal and control use no-follow opens, reject links and
+unexpected file types, and verify owner and mode. Cancellation checks the
+recorded boot identity and process start token before signaling the recorded
+process group instead of trusting a potentially reused PID.
+
+Command and stdin remain private remote records and are omitted from job-list
+output. Aggregate stdout plus stderr is bounded to 64 MiB by default. Terminal
+records use seven-day lazy retention: a later job operation removes expired
+terminal records. A job survives a Claude Code task, bridge disconnect, and
+local Claude Code restart, but has no automatic restart after a remote reboot.
+
 ## Files, output, and protocol limits
 
 - The TOML config is a private current-user-owned regular file; load/save reject unsafe ancestors, symlinks, FIFOs, and group/other-writable modes.

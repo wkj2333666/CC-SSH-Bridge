@@ -312,6 +312,87 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
 }
 
 #[test]
+fn packaged_skill_and_reference_describe_both_patch_formats() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md");
+    let operations = read_text("skills/remote-ssh-ops/references/operations.md");
+    let combined = format!("{skill}\n{operations}");
+
+    for required in [
+        "Claude Code",
+        "*** Begin Patch",
+        "standard unified diff",
+        "absolute paths",
+        "*** Move to",
+        "unsupported",
+    ] {
+        assert!(
+            combined.contains(required),
+            "packaged patch documentation omits {required:?}"
+        );
+    }
+}
+
+#[test]
+fn skill_and_reference_teach_the_durable_remote_job_boundary() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
+    let operations =
+        read_text("skills/remote-ssh-ops/references/operations.md").to_ascii_lowercase();
+    for document in [&skill, &operations] {
+        for tool in [
+            "remote_job_start",
+            "remote_job_status",
+            "remote_job_logs",
+            "remote_job_cancel",
+            "remote_job_list",
+            "remote_job_delete",
+        ] {
+            assert!(document.contains(tool), "job reference omits {tool}");
+        }
+        for boundary in [
+            "`remote_run` remains synchronous",
+            "claude code task",
+            "bridge disconnect",
+            "survives",
+            "never submit the command again blindly",
+            "no automatic restart after a remote reboot",
+        ] {
+            assert!(
+                document.contains(boundary),
+                "job reference omits lifecycle boundary {boundary:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_docs_state_remote_job_storage_security_and_retention() {
+    let docs = [
+        read_text("README.md"),
+        read_text("docs/security.md"),
+        read_text("docs/performance.md"),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    for required in [
+        ".local/state/cc-ssh-bridge/jobs",
+        "0700",
+        "0600",
+        "no-follow",
+        "process start",
+        "64 mib",
+        "seven-day",
+        "lazy retention",
+        "persistent binary helper",
+        "no automatic restart after a remote reboot",
+    ] {
+        assert!(
+            docs.contains(required),
+            "public job documentation omits {required:?}"
+        );
+    }
+}
+
+#[test]
 fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
     let skill = read_text("skills/remote-ssh-ops/SKILL.md")
         .to_ascii_lowercase()

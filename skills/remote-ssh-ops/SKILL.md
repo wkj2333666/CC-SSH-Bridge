@@ -42,9 +42,15 @@ fails, the requested barrier command or observation does not run.
 - `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. Use `globs`, not invented exclude or kind fields.
 - `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; every path is absolute and reads are line-based and bounded.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
-- `remote_apply_patch`: `{host, patch}`; unified diff headers use absolute remote paths or `/dev/null`, with no cwd field.
+- `remote_apply_patch`: `{host, patch}`; accepts Claude Code's native `*** Begin Patch` Add/Update/Delete envelope or standard unified diff. Every file path must be absolute (or `/dev/null` in unified headers); `*** Move to` is unsupported. Do not add a cwd or format field.
 - `remote_write`: `{host, path, content, encoding, mode}`; `path` must be absolute. Prefer patching. For replacement, supply the observed SHA-256 when available.
 - `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string, not argv or a background job. stdin is an object `{encoding:"utf8"|"base64", value}`.
+- `remote_job_start`: `{host, command, cwd, shell?, timeout_ms?, stdin?, label?}`; starts a durable long-running command and returns its opaque `job_id`.
+- `remote_job_status`: `{host, job_id}`; reads durable state and verified process identity.
+- `remote_job_logs`: `{host, job_id, stdout_offset?, stderr_offset?, max_bytes?}`; reads bounded incremental stdout and stderr and returns the next offsets.
+- `remote_job_cancel`: `{host, job_id}`; idempotently cancels the verified process group.
+- `remote_job_list`: `{host, max_jobs?}`; lists newest summaries without command or stdin content.
+- `remote_job_delete`: `{host, job_id}`; deletes retained files only after the job is terminal.
 
 All schemas are closed. Follow the live schema if it differs from this quick reference.
 
@@ -55,6 +61,15 @@ Prefer POSIX command syntax. Omitting `shell` requests Bash. Request `shell:"sh"
 Requests are multiplexed over the host session. The bridge does not impose a host count, task window, global concurrency limit, or per-host concurrency limit. Buffered edits and filesystem barriers coordinate same-host visibility, but do not rely on ordering between otherwise concurrent calls. A timeout or cancellation targets only its request; if termination is not confirmed, that result reports that the remote process may continue while unrelated request IDs remain usable. Every MCP path and command working directory is an explicit absolute remote path; symlink retargeting follows ordinary server filesystem semantics. A failed dispatcher handshake is a hard error and must not silently fall back to a one-shot SSH command.
 
 Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect remote account and filesystem policy, and obtain authorization for destructive or high-impact work.
+
+`remote_run` remains synchronous. Use `remote_job_start` for an HTTP server,
+viewer, training run, download, or other long-lived work; do not hand-roll
+detachment with `&`, `nohup`, tmux, or inherited bridge pipes. A remote job
+survives the initiating MCP call, Claude Code task, bridge disconnect, and
+local Claude Code restart because its runner and records live on the server.
+It has no automatic restart after a remote reboot. Preserve the returned `job_id`; after an
+interrupted start or control call, inspect `remote_job_status` or
+`remote_job_list` and never submit the command again blindly.
 
 ## SSHFS
 

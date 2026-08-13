@@ -152,15 +152,19 @@ Use $remote-ssh-ops to inspect the devbox repository, patch the timeout bug, and
 Use $remote-ssh-ops to search devbox logs without downloading unbounded output.
 ```
 
-The nine MCP tools are:
+The fifteen MCP tools are:
 
 | Read-oriented | Mutation/command |
 |---|---|
-| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read` | `remote_apply_patch`, `remote_write`, `remote_run` |
+| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_job_status`, `remote_job_logs`, `remote_job_list` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_job_start`, `remote_job_cancel`, `remote_job_delete` |
 
-The default flow is bounded search/read → unified patch → remote verification. Calls are synchronous. Oversized detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
+The default flow is bounded search/read → Claude Code or unified patch → remote verification. `remote_run` is synchronous; durable remote jobs use an opaque job ID. Oversized synchronous detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 
-Every MCP filesystem path and `remote_run.cwd` is required and absolute. The bridge never infers a remote working directory from SSH home, a host profile, a previous call, or the current task. Unified patch headers likewise use absolute remote paths or `/dev/null`.
+All MCP file paths and `remote_run.cwd` are absolute remote paths. `remote_apply_patch` accepts Claude Code's native `*** Begin Patch` Add/Update/Delete envelope or standard unified diff. File paths must be absolute (or `/dev/null` in unified create/delete headers), and `*** Move to` is unsupported.
+
+The bridge never infers a remote working directory from SSH home, a host profile, a previous call, or the current task.
+
+Use `remote_job_start` for a long-running service, training run, download, or other durable work. Its runner and records survive the initiating MCP call, bridge disconnect, and local Claude Code restart, but are not automatically restarted after a remote reboot. Preserve the returned `job_id`; inspect status or recent jobs before retrying an interrupted start or control call.
 
 `remote_run` accepts one command string plus `shell: bash|sh|login`; omitting `shell` means Bash. Prefer POSIX syntax and request `sh` explicitly when Bash is unavailable. A Bash request fails closed instead of silently changing command meaning. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, warnings, exit status, truncation, and process-continuation uncertainty.
 
