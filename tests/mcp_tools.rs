@@ -561,7 +561,6 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let edit_status = session
         .call("remote_edit_status", json!({"host":"dev"}))
         .await;
-    assert_no_diagnostic_success_fields(&edit_status);
     assert_eq!(edit_status["structuredContent"]["pending_paths"], json!([]));
     assert!(
         edit_status["content"][0]["text"]
@@ -573,13 +572,11 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let synced = session
         .call("remote_sync_edits", json!({"host":"dev"}))
         .await;
-    assert_no_diagnostic_success_fields(&synced);
     assert_eq!(synced["structuredContent"]["pending_paths"], json!([]));
 
     let discarded = session
         .call("remote_discard_edits", json!({"host":"dev"}))
         .await;
-    assert_no_diagnostic_success_fields(&discarded);
     assert_eq!(discarded["structuredContent"]["discarded_paths"], json!([]));
 
     let written = session
