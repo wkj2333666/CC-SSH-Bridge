@@ -750,6 +750,16 @@ impl HostSession {
         self.inner.closed.load(Ordering::Acquire)
     }
 
+    pub(crate) fn is_reusable(&self) -> bool {
+        !self.is_closed()
+    }
+
+    pub(crate) fn retire_idle(&self) {
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+            terminate_process_group(self.inner.process_group.load(Ordering::Acquire));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn wedged_for_test(host: &str, max_payload: usize, max_output_bytes: u64) -> Self {
         let (tx, mut rx) = mpsc::channel::<Outbound>(64);
