@@ -1,6 +1,6 @@
 # CC SSH Bridge
 
-Use Claude Code on this local machine to inspect, edit, and run commands on allowlisted SSH servers without installing or signing in to Claude Code on those servers.
+Use Claude Code on this local machine to inspect, edit, and run commands through configured OpenSSH aliases without installing or signing in to Claude Code on those servers.
 
 ```text
 local Claude Code
@@ -22,7 +22,7 @@ The bridge keeps one locally owned SSH session per alias. On supported Linux arc
 |---|---|---|---|
 | Raw `ssh` | Universal and minimal | Leaves target selection, quoting, limits, shell detection, cancellation, and output handling to the Agent | Transport below the bridge |
 | SSHFS | Convenient human browsing | Makes remote files look local while commands still run locally; adds FUSE/SFTP latency and reconnect semantics | Explicit optional CLI only |
-| Native local MCP | Closed schemas, allowlisted hosts, bounded I/O, shared policy, visible Bash/sh fallback | Non-interactive by design | Default Agent interface |
+| Native local MCP | Closed schemas, configured OpenSSH aliases, bounded I/O, shared policy, visible Bash/sh fallback | Non-interactive by design | Default Agent interface |
 | Official SSH Remote | Native remote project experience | Currently requires remote installation/authentication | Deliberately not used |
 
 The bridge is Rust rather than a Bash program because strict MCP framing, bounded parsing, async concurrency, process-group cancellation, spool quotas, and transactional installation need one auditable state machine. Bash and POSIX sh remain supported as the *remote command shells*; the result always reports which shell actually ran.

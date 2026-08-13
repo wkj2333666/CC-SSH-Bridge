@@ -50,7 +50,7 @@ pub enum Command {
     Hosts(HostsArgs),
     /// Diagnose configuration, SSH resolution, and remote capabilities.
     Doctor(DoctorArgs),
-    /// Run an argv-style command on an allowlisted remote host.
+    /// Run an argv-style command through a configured OpenSSH alias.
     Run(RunArgs),
     /// Mount a remote path explicitly with SSHFS (human use only).
     Mount(MountArgs),

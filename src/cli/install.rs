@@ -1598,7 +1598,7 @@ fn find_executable(name: &str) -> BridgeResult<PathBuf> {
         }
     }
     Err(BridgeError::invalid_config(
-        "cc (Claude Code CLI) was not found on PATH",
+        "claude (Claude Code CLI) was not found on PATH",
     ))
 }
 
