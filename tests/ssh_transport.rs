@@ -2908,6 +2908,7 @@ async fn normal_completion_does_not_wait_for_pipe_inheriting_descendants() {
     let files = TempDir::new().unwrap();
     let pid_file = files.path().join("child.pid");
     let parent_exit = files.path().join("parent.exit");
+    let orphan_once = files.path().join("orphan.once");
     let fixture = task3_runner(
         &["dev"],
         Limits::default(),
@@ -2919,6 +2920,10 @@ async fn normal_completion_does_not_wait_for_pipe_inheriting_descendants() {
             (
                 "FAKE_SSH_PARENT_EXIT_FILE",
                 parent_exit.display().to_string(),
+            ),
+            (
+                "FAKE_SSH_ORPHAN_ONCE_MARKER",
+                orphan_once.display().to_string(),
             ),
         ],
     );
@@ -2937,6 +2942,13 @@ async fn normal_completion_does_not_wait_for_pipe_inheriting_descendants() {
     assert!(started.elapsed() < Duration::from_millis(450));
     assert_eq!(result.status, 0);
     assert!(result.remote_process_may_continue);
+    wait_for_file(&pid_file).await;
+    wait_for_file(&parent_exit).await;
+    let pid = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let follow_up = timeout(
         Duration::from_millis(500),
         runner.execute(
@@ -2949,13 +2961,6 @@ async fn normal_completion_does_not_wait_for_pipe_inheriting_descendants() {
     .unwrap();
     assert_eq!(follow_up.status, 0);
     assert!(!follow_up.remote_process_may_continue);
-    wait_for_file(&pid_file).await;
-    wait_for_file(&parent_exit).await;
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     force_kill_process(pid);
     wait_for_process_exit(pid).await;
 }

@@ -276,7 +276,13 @@ run_request() {
                         fi
                         ;;
                     orphan-streams)
-                        run_command="(
+                        if [ -n "${FAKE_SSH_ORPHAN_ONCE_MARKER-}" ] &&
+                           [ -e "$FAKE_SSH_ORPHAN_ONCE_MARKER" ]; then
+                            :
+                        else
+                            [ -z "${FAKE_SSH_ORPHAN_ONCE_MARKER-}" ] ||
+                                : >"$FAKE_SSH_ORPHAN_ONCE_MARKER"
+                            run_command="(
     trap '' TERM HUP
     sleep \"\${FAKE_SSH_SLEEP_SECONDS-10}\"
 ) &
@@ -284,6 +290,7 @@ orphan_pid=\$!
 if [ -n \"\${FAKE_SSH_CHILD_PID_FILE-}\" ]; then printf \"%s\\\\n\" \"\$orphan_pid\" >\"\$FAKE_SSH_CHILD_PID_FILE\"; fi
 if [ -n \"\${FAKE_SSH_PARENT_EXIT_FILE-}\" ]; then printf \"%s\\\\n\" exited >\"\$FAKE_SSH_PARENT_EXIT_FILE\"; fi
 exit 0"
+                        fi
                         ;;
                     orphan-stdin)
                         run_command="exec 3<&0
@@ -470,9 +477,13 @@ exit 0"
     if kill -0 -"$run_pid" 2>/dev/null; then run_process_group_alive=1; fi
     if [ "$run_process_group_alive" -eq 1 ]; then
         run_drain_wait=0
+        run_drain_limit=12
         while :; do
             [ -f "$run_stdout.done" ] && [ -f "$run_stderr.done" ] && break
-            [ "$run_drain_wait" -lt 12 ] || break
+            # Once the watchdog fires, leave enough time for TERM/KILL cleanup
+            # and the collectors' EOF markers before reporting continuation.
+            [ ! -e "$run_timeout_marker" ] || run_drain_limit=20
+            [ "$run_drain_wait" -lt "$run_drain_limit" ] || break
             sleep 0.01
             run_drain_wait=$((run_drain_wait + 1))
         done
@@ -481,16 +492,18 @@ exit 0"
         wait "$run_stdout_collector" 2>/dev/null || true
         wait "$run_stderr_collector" 2>/dev/null || true
     fi
+    if [ -n "$run_watchdog_pid" ]; then
+        kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
+        wait "$run_watchdog_launcher" 2>/dev/null || true
+    fi
+    run_process_group_alive=0
+    if kill -0 -"$run_pid" 2>/dev/null; then run_process_group_alive=1; fi
     run_process_may_continue=0
     if [ ! -f "$run_stdout.done" ] || [ ! -f "$run_stderr.done" ]; then
         run_process_may_continue=1
     fi
     if [ "$run_process_group_alive" -eq 1 ] || kill -0 -"$run_pid" 2>/dev/null; then
         run_process_may_continue=1
-    fi
-    if [ -n "$run_watchdog_pid" ]; then
-        kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
-        wait "$run_watchdog_launcher" 2>/dev/null || true
     fi
     send_stream STDOUT "$run_id" "$run_stdout" "$run_dir"
     send_stream STDERR "$run_id" "$run_stderr" "$run_dir"
