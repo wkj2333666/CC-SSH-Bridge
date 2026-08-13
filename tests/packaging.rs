@@ -149,6 +149,24 @@ fn release_workflow_builds_and_packages_all_common_targets() {
     assert!(workflow.contains("--bin cc-ssh-bridge-helper"));
     assert!(workflow.contains("statically linked|musl"));
     assert!(workflow.contains("find release-assets -maxdepth 1 -type f"));
+    for packaged_resource in [
+        "$root/bin/cc-ssh-bridge",
+        ".claude-plugin",
+        "skills",
+        "README.md",
+        "LICENSE",
+        "config.example.toml",
+        ".mcp.json",
+        "docs/security.md",
+        "docs/performance.md",
+    ] {
+        assert!(
+            workflow.contains(packaged_resource),
+            "release archive omits {packaged_resource}"
+        );
+    }
+    assert!(workflow.contains("Check out tagged source for package resources"));
+    assert!(workflow.contains("(cd dist && sha256sum"));
 }
 
 #[test]

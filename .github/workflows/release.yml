@@ -212,6 +212,9 @@ jobs:
           - powerpc64le-unknown-linux-gnu
           - s390x-unknown-linux-gnu
     steps:
+      - name: Check out tagged source for package resources
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
       - name: Download bridge artifacts
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
@@ -235,8 +238,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           name="cc-ssh-bridge-${version}-${TARGET}"
           root="dist/$name"
-          mkdir -p "$root/remote-helpers"
-          install -m 0755 "staging/main-$TARGET/cc-ssh-bridge" "$root/cc-ssh-bridge"
+          mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
+          install -m 0755 "staging/main-$TARGET/cc-ssh-bridge" "$root/bin/cc-ssh-bridge"
           for helper in \
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl \
@@ -246,8 +249,23 @@ jobs:
             s390x-unknown-linux-gnu; do
             install -m 0755 "staging/helper-$helper/$helper" "$root/remote-helpers/$helper"
           done
+          for resource in \
+            .claude-plugin \
+            skills \
+            README.md \
+            LICENSE \
+            config.example.toml \
+            .mcp.json; do
+            cp -a "$resource" "$root/"
+          done
+          cp -a docs/security.md docs/performance.md "$root/docs/"
+          test -x "$root/bin/cc-ssh-bridge"
+          test -x "$root/remote-helpers/aarch64-unknown-linux-musl"
+          test -f "$root/.claude-plugin/plugin.json"
+          test -f "$root/skills/remote-ssh-ops/SKILL.md"
+          test -f "$root/.mcp.json"
           tar -C "dist" -czf "dist/$name.tar.gz" "$name"
-          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
       - name: Upload packaged release
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
