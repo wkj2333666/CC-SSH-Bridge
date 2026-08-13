@@ -9,7 +9,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -143,6 +143,85 @@ pub(crate) struct NativeSearchRunResult {
     pub output: Vec<u8>,
 }
 
+struct SessionSlot {
+    session: Arc<HostSession>,
+    leased: AtomicBool,
+}
+
+struct SessionLease {
+    slot: Arc<SessionSlot>,
+}
+
+impl SessionLease {
+    fn session(&self) -> &Arc<HostSession> {
+        &self.slot.session
+    }
+}
+
+impl std::ops::Deref for SessionLease {
+    type Target = HostSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slot.session
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        self.slot.leased.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+struct SessionPool {
+    hosts: Mutex<HashMap<String, Vec<Arc<SessionSlot>>>>,
+}
+
+impl SessionPool {
+    async fn lease_idle(&self, host: &str) -> Option<SessionLease> {
+        let mut hosts = self.hosts.lock().await;
+        let slots = hosts.get_mut(host)?;
+        slots.retain(|slot| !slot.session.is_closed());
+        for slot in slots {
+            if slot
+                .leased
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(SessionLease {
+                    slot: Arc::clone(slot),
+                });
+            }
+        }
+        None
+    }
+
+    async fn insert_leased(&self, host: &str, session: Arc<HostSession>) -> SessionLease {
+        let slot = Arc::new(SessionSlot {
+            session,
+            leased: AtomicBool::new(true),
+        });
+        self.hosts
+            .lock()
+            .await
+            .entry(host.to_owned())
+            .or_default()
+            .push(Arc::clone(&slot));
+        SessionLease { slot }
+    }
+
+    async fn remove(&self, host: &str, expected: &Arc<HostSession>) {
+        let mut hosts = self.hosts.lock().await;
+        let Some(slots) = hosts.get_mut(host) else {
+            return;
+        };
+        slots.retain(|slot| !Arc::ptr_eq(&slot.session, expected));
+        if slots.is_empty() {
+            hosts.remove(host);
+        }
+    }
+}
+
 pub struct SshRunner {
     config: Arc<Config>,
     runtime: RuntimePaths,
@@ -154,8 +233,7 @@ pub struct SshRunner {
     policies: Mutex<HashMap<String, Arc<SshPolicy>>>,
     identities: Mutex<HashMap<String, String>>,
     initializers: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    sessions: Mutex<HashMap<String, Arc<HostSession>>>,
-    session_initializers: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    sessions: SessionPool,
 }
 
 impl SshRunner {
@@ -200,8 +278,7 @@ impl SshRunner {
             policies: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
             initializers: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            session_initializers: Mutex::new(HashMap::new()),
+            sessions: SessionPool::default(),
         })
     }
 
@@ -309,7 +386,7 @@ impl SshRunner {
         let capture_started = Instant::now();
         let captured = self
             .execute_with_capture(
-                &session,
+                session.session(),
                 SessionRequest {
                     action: SessionAction::Command {
                         command: request.command,
@@ -338,7 +415,7 @@ impl SshRunner {
             Ok(result) => result,
             Err(error) => {
                 if session.is_closed() {
-                    self.drop_session(&request.host, &session).await;
+                    self.drop_session(&request.host, session.session()).await;
                 }
                 return Err(attach_selected_context(
                     error,
@@ -551,37 +628,9 @@ impl SshRunner {
         capability: &Capability,
         setup_deadline: Instant,
         cancel: &CancellationToken,
-    ) -> BridgeResult<Arc<HostSession>> {
-        if let Some(session) = self.sessions.lock().await.get(host).cloned() {
-            if !session.is_closed() {
-                return Ok(session);
-            }
-            self.sessions.lock().await.remove(host);
-        }
-        let connector = {
-            let mut initializers = self.session_initializers.lock().await;
-            Arc::clone(
-                initializers
-                    .entry(host.to_owned())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
-        };
-        let _guard = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
-            guard = connector.lock() => guard,
-            () = tokio::time::sleep_until(setup_deadline) => {
-                return Err(connect_wait_timeout(
-                    host,
-                    "SSH session initializer wait timed out",
-                ));
-            }
-        };
-        if let Some(session) = self.sessions.lock().await.get(host).cloned() {
-            if !session.is_closed() {
-                return Ok(session);
-            }
-            self.sessions.lock().await.remove(host);
+    ) -> BridgeResult<SessionLease> {
+        if let Some(session) = self.sessions.lease_idle(host).await {
+            return Ok(session);
         }
         let mut connect_limits = limits;
         connect_limits.connect_timeout_ms = remaining_connect_timeout_ms(setup_deadline, host)?;
@@ -597,21 +646,11 @@ impl SshRunner {
             )
             .await?,
         );
-        self.sessions
-            .lock()
-            .await
-            .insert(host.to_owned(), Arc::clone(&session));
-        Ok(session)
+        Ok(self.sessions.insert_leased(host, session).await)
     }
 
     async fn drop_session(&self, host: &str, expected: &Arc<HostSession>) {
-        let mut sessions = self.sessions.lock().await;
-        if sessions
-            .get(host)
-            .is_some_and(|current| Arc::ptr_eq(current, expected))
-        {
-            sessions.remove(host);
-        }
+        self.sessions.remove(host, expected).await;
     }
 
     async fn execute_with_capture<T, F>(
@@ -928,7 +967,7 @@ impl SshRunner {
             Ok(result) => result,
             Err(error) => {
                 if session.is_closed() {
-                    self.drop_session(&request.host, &session).await;
+                    self.drop_session(&request.host, session.session()).await;
                 }
                 return Err(attach_selected_context(
                     request.kind.after_spawn_error(error),
@@ -1987,9 +2026,9 @@ fn elapsed_ms(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildSpec, FixedOperationKind, Phase, RootedArgumentStride, RootedPathInputs, SshRunner,
-        capability_probe_command, mutation_unknown, pin_fixed_inputs, render_fixed_command,
-        render_fixed_command_text,
+        ChildSpec, FixedOperationKind, Phase, RootedArgumentStride, RootedPathInputs, SessionPool,
+        SshRunner, capability_probe_command, mutation_unknown, pin_fixed_inputs,
+        render_fixed_command, render_fixed_command_text,
     };
     use crate::capability::{ShellKind, ShellSelection, parse_probe_output};
     use crate::config::{Config, HostProfile};
@@ -2005,6 +2044,29 @@ mod tests {
     use tokio::io::duplex;
     use tokio::time::{Instant, sleep, timeout};
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn an_active_session_is_not_shared_with_a_concurrent_request() {
+        let pool = SessionPool::default();
+        let session = Arc::new(HostSession::wedged_for_test(
+            "dev",
+            crate::MAX_FRAME_BYTES,
+            crate::MAX_OUTPUT_BYTES,
+        ));
+        let first = pool.insert_leased("dev", Arc::clone(&session)).await;
+
+        assert!(
+            pool.lease_idle("dev").await.is_none(),
+            "a concurrent request reused an active SSH transport"
+        );
+
+        drop(first);
+        let reused = pool
+            .lease_idle("dev")
+            .await
+            .expect("the released warm session was not reusable");
+        assert!(Arc::ptr_eq(reused.session(), &session));
+    }
 
     #[test]
     fn capability_probe_command_binds_hostile_root_as_positional_one() {

@@ -233,10 +233,14 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         persistent_session_runner(&base, &log, &install_log, &bytes_log, machine_arch, false);
     let mut first_request = request("printf helper-first");
     first_request.timeout = Duration::from_secs(30);
-    let first = runner
-        .execute(first_request, CancellationToken::new())
-        .await
-        .unwrap();
+    let mut concurrent_request = request("printf helper-concurrent");
+    concurrent_request.timeout = Duration::from_secs(30);
+    let (first, concurrent) = tokio::join!(
+        runner.execute(first_request, CancellationToken::new()),
+        runner.execute(concurrent_request, CancellationToken::new()),
+    );
+    let first = first.unwrap();
+    let concurrent = concurrent.unwrap();
     assert_eq!(
         first.helper_mode,
         cc_ssh_bridge::ssh::HelperMode::Persistent
@@ -244,6 +248,14 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
     assert_eq!(
         String::from_utf8_lossy(&first.output.stdout.head),
         "helper-first"
+    );
+    assert_eq!(
+        concurrent.helper_mode,
+        cc_ssh_bridge::ssh::HelperMode::Persistent
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&concurrent.output.stdout.head),
+        "helper-concurrent"
     );
 
     let mut timed_request = request("sleep 30");
@@ -274,13 +286,33 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         after_timeout.helper_mode,
         cc_ssh_bridge::ssh::HelperMode::Persistent
     );
-    assert_eq!(fs::read_to_string(&install_log).unwrap(), "NEED\n");
+    let install_events = fs::read_to_string(&install_log).unwrap();
+    let install_events = install_events.lines().collect::<Vec<_>>();
+    assert_eq!(install_events.len(), 2, "{install_events:?}");
+    assert_eq!(
+        install_events
+            .iter()
+            .filter(|event| **event == "NEED")
+            .count(),
+        1,
+        "{install_events:?}"
+    );
+    assert_eq!(
+        install_events
+            .iter()
+            .filter(|event| **event == "HIT")
+            .count(),
+        1,
+        "{install_events:?}"
+    );
     let uploaded = fs::read_to_string(&bytes_log)
         .unwrap()
-        .trim()
-        .parse::<u64>()
-        .unwrap();
-    assert!(uploaded > 0);
+        .lines()
+        .map(|line| line.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(uploaded.len(), 2, "{uploaded:?}");
+    assert_eq!(uploaded.iter().filter(|bytes| **bytes == 0).count(), 1);
+    assert_eq!(uploaded.iter().filter(|bytes| **bytes > 0).count(), 1);
     drop(runner);
 
     let restart_log = base.path().join("restart-ssh.log");
