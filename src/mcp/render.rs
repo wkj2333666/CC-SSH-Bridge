@@ -9,11 +9,11 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{BridgeError, ErrorCode, ErrorDetails, ErrorShellMetadata};
 use crate::job_protocol::{JobLogEncoding, JobLogPage, JobStateRecord};
 use crate::remote::{
-    AggregateKind, ApplyPatchResult, EncodedValue, HostsResult, ListResult, OutputReadResult,
-    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteJobDeleteResult, RemoteJobListResult,
-    RemoteJobLogsResult, RemoteJobStartResult, RemoteJobStatusResult, RemoteRunResult,
-    RetentionProvenance, SearchEngine, SearchResult, ShellMetadata, ShellName, StatResult,
-    ValueEncoding, WriteResult,
+    AggregateKind, ApplyPatchResult, DiscardEditsResult, EditStatusResult, EncodedValue,
+    HostsResult, ListResult, OutputReadResult, ReadEntry, ReadResult, RemoteBridge, RemoteContext,
+    RemoteJobDeleteResult, RemoteJobListResult, RemoteJobLogsResult, RemoteJobStartResult,
+    RemoteJobStatusResult, RemoteRunResult, RetentionProvenance, SearchEngine, SearchResult,
+    ShellMetadata, ShellName, StatResult, SyncEditsResult, ValueEncoding, WriteResult,
 };
 
 use super::{CallToolResult, TextContent, WireBudget};
@@ -343,6 +343,85 @@ pub fn output_read(
             );
         }
         inline /= 2;
+    }
+}
+
+pub fn edit_status(
+    result: Result<EditStatusResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = format!(
+                "Edit cache for {}\npending_paths: {}\noutcome_unknown_paths: {}\npending_payload_bytes: {}\ncached_bytes: {}",
+                result.host,
+                result.pending_paths.len(),
+                result.outcome_unknown_paths.len(),
+                result.pending_payload_bytes,
+                result.cached_bytes
+            );
+            let structured = json!({
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+                "pending_payload_bytes": result.pending_payload_bytes,
+                "cached_bytes": result.cached_bytes,
+            });
+            complete_text_result(text, structured.clone(), budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn sync_edits(
+    result: Result<SyncEditsResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = format!(
+                "Synchronized edits for {}\npending_paths: {}\noutcome_unknown_paths: {}\npending_payload_bytes: {}",
+                result.host,
+                result.pending_paths.len(),
+                result.outcome_unknown_paths.len(),
+                result.pending_payload_bytes
+            );
+            let structured = json!({
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+                "pending_payload_bytes": result.pending_payload_bytes,
+            });
+            complete_text_result(text, structured.clone(), budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn discard_edits(
+    result: Result<DiscardEditsResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = format!(
+                "Discarded edits for {}\ndiscarded_paths: {}\ndiscarded_payload_bytes: {}\nhad_outcome_unknown: {}",
+                result.host,
+                result.discarded_paths.len(),
+                result.discarded_payload_bytes,
+                result.had_outcome_unknown
+            );
+            let structured = json!({
+                "discarded_paths": result.discarded_paths,
+                "discarded_payload_bytes": result.discarded_payload_bytes,
+                "had_outcome_unknown": result.had_outcome_unknown,
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+            });
+            complete_text_result(text, structured.clone(), budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
     }
 }
 
@@ -735,6 +814,19 @@ fn complete_result<T: Serialize>(
         is_error: false,
     };
     serialized_at_most(&result, maximum).then_some(result)
+}
+
+fn complete_text_result(
+    text: String,
+    structured_content: Value,
+    budget: WireBudget,
+) -> Option<CallToolResult> {
+    let result = CallToolResult {
+        content: vec![TextContent::new(text)],
+        structured_content,
+        is_error: false,
+    };
+    serialized_at_most(&result, total_budget(budget)).then_some(result)
 }
 
 fn compact_result(structured_content: Value, is_error: bool) -> CallToolResult {

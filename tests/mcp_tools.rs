@@ -558,6 +558,30 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     assert_remote_context(&output, remote.path());
     assert!(text_json(&output).to_string().contains("RUN_SURFACE"));
 
+    let edit_status = session
+        .call("remote_edit_status", json!({"host":"dev"}))
+        .await;
+    assert_no_diagnostic_success_fields(&edit_status);
+    assert_eq!(edit_status["structuredContent"]["pending_paths"], json!([]));
+    assert!(
+        edit_status["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pending_paths: 0")
+    );
+
+    let synced = session
+        .call("remote_sync_edits", json!({"host":"dev"}))
+        .await;
+    assert_no_diagnostic_success_fields(&synced);
+    assert_eq!(synced["structuredContent"]["pending_paths"], json!([]));
+
+    let discarded = session
+        .call("remote_discard_edits", json!({"host":"dev"}))
+        .await;
+    assert_no_diagnostic_success_fields(&discarded);
+    assert_eq!(discarded["structuredContent"]["discarded_paths"], json!([]));
+
     let written = session
         .call(
             "remote_write",
@@ -914,6 +938,9 @@ fn task8_registry_contains_exactly_the_high_level_remote_tools() {
             "remote_search",
             "remote_read",
             "remote_output_read",
+            "remote_edit_status",
+            "remote_sync_edits",
+            "remote_discard_edits",
             "remote_apply_patch",
             "remote_write",
             "remote_run",
@@ -1040,6 +1067,9 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
         ("remote_search", json!(["host", "query", "path"])),
         ("remote_read", json!(["host", "paths"])),
         ("remote_output_read", json!(["output_ref", "stream"])),
+        ("remote_edit_status", json!(["host"])),
+        ("remote_sync_edits", json!(["host"])),
+        ("remote_discard_edits", json!(["host"])),
         ("remote_apply_patch", json!(["host", "patch"])),
         (
             "remote_write",
@@ -1057,6 +1087,9 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
         "remote_stat",
         "remote_search",
         "remote_read",
+        "remote_edit_status",
+        "remote_sync_edits",
+        "remote_discard_edits",
         "remote_apply_patch",
         "remote_write",
         "remote_run",
@@ -1196,7 +1229,7 @@ fn task8_schema_defaults_and_closed_write_mode_are_exact() {
 
 #[test]
 fn task8_schema_annotations_match_remote_side_effects() {
-    for name in ["remote_hosts", "remote_output_read"] {
+    for name in ["remote_hosts", "remote_output_read", "remote_edit_status"] {
         let annotations = serde_json::to_value(tool(name).annotations).unwrap();
         assert_eq!(
             annotations,
@@ -1222,7 +1255,12 @@ fn task8_schema_annotations_match_remote_side_effects() {
             "{name}"
         );
     }
-    for name in ["remote_apply_patch", "remote_write", "remote_run"] {
+    for name in [
+        "remote_apply_patch",
+        "remote_write",
+        "remote_run",
+        "remote_sync_edits",
+    ] {
         let annotations = serde_json::to_value(tool(name).annotations).unwrap();
         assert_eq!(
             annotations,
@@ -1235,6 +1273,16 @@ fn task8_schema_annotations_match_remote_side_effects() {
             "{name}"
         );
     }
+    let annotations = serde_json::to_value(tool("remote_discard_edits").annotations).unwrap();
+    assert_eq!(
+        annotations,
+        json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false
+        })
+    );
 }
 
 #[test]

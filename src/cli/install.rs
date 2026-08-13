@@ -1340,7 +1340,7 @@ fn canonical_secure_cc_executable(path: &Path) -> BridgeResult<PathBuf> {
     validate_trusted_ancestors(&canonical)?;
     let target_metadata = fs::symlink_metadata(&canonical).map_err(BridgeError::io)?;
     validate_trusted_source_file(&target_metadata, true)?;
-    Ok(canonical)
+    Ok(path.to_owned())
 }
 
 fn canonical_secure_directory(path: &Path) -> BridgeResult<PathBuf> {
@@ -1609,14 +1609,29 @@ fn nonempty_environment(name: &str) -> Option<OsString> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use tempfile::TempDir;
 
     use super::{
         InstallJournal, advance_private_source_boundary, apply_config_migration,
-        inspect_config_migration, rollback_config_migration,
+        canonical_secure_cc_executable, inspect_config_migration, rollback_config_migration,
     };
+
+    #[test]
+    fn secure_cc_executable_preserves_validated_symlink_entry_for_argv0() {
+        let temporary = TempDir::new().unwrap();
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = temporary.path().join("claude-provider-switcher");
+        fs::write(&target, b"switcher").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let entry = bin.join("cc");
+        symlink(&target, &entry).unwrap();
+
+        assert_eq!(canonical_secure_cc_executable(&entry).unwrap(), entry);
+    }
 
     #[test]
     fn private_source_boundary_never_trusts_foreign_or_writable_root_owned_descendants() {

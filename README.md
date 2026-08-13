@@ -152,11 +152,11 @@ Use $remote-ssh-ops to inspect the devbox repository, patch the timeout bug, and
 Use $remote-ssh-ops to search devbox logs without downloading unbounded output.
 ```
 
-The fifteen MCP tools are:
+The eighteen MCP tools are:
 
 | Read-oriented | Mutation/command |
 |---|---|
-| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_job_status`, `remote_job_logs`, `remote_job_list` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_job_start`, `remote_job_cancel`, `remote_job_delete` |
+| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_edit_status`, `remote_job_status`, `remote_job_logs`, `remote_job_list` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits`, `remote_job_start`, `remote_job_cancel`, `remote_job_delete` |
 
 The default flow is bounded search/read → Claude Code or unified patch → remote verification. `remote_run` is synchronous; durable remote jobs use an opaque job ID. Oversized synchronous detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 
@@ -174,7 +174,10 @@ the first guarded snapshot. Dirty edits synchronize within 30 seconds, after
 16 KiB of edit payload, before commands and filesystem-wide observations, or
 on clean MCP shutdown. An SSH interruption or abnormal bridge exit can lose an
 unsynchronized edit; a failed synchronization prevents its barrier operation
-from starting.
+from starting. If a host enters an uncertain edit state, inspect the local
+cache with `remote_edit_status`, retry synchronization with `remote_sync_edits`,
+or discard the local uncertain edits with `remote_discard_edits` before
+observing the remote state again.
 
 Operational requests are multiplexed over one persistent SSH session per alias without bridge-defined host or concurrency admission limits. Each request has an independent process group and cancellation. Buffered edits and filesystem barriers coordinate same-host visibility, but otherwise concurrent calls have no general ordering guarantee. If cancellation cannot be confirmed, the result reports that the remote process may continue rather than retrying it.
 
