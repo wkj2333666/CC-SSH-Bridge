@@ -712,10 +712,15 @@ impl HostSession {
             });
         }
         match timeout(CANCEL_GRACE, receiver).await {
-            Ok(Ok(_result)) => Err(if timed_out {
-                timeout_error(&self.inner.host, false)
+            Ok(Ok(Ok(result))) => Err(if timed_out {
+                timeout_error(&self.inner.host, result.remote_process_may_continue)
             } else {
-                cancelled_error(&self.inner.host, false)
+                cancelled_error(&self.inner.host, result.remote_process_may_continue)
+            }),
+            Ok(Ok(Err(_))) => Err(if timed_out {
+                timeout_error(&self.inner.host, true)
+            } else {
+                cancelled_error(&self.inner.host, true)
             }),
             Ok(Err(_)) | Err(_) => {
                 self.inner.shutdown().await;
@@ -1713,13 +1718,28 @@ mod tests {
     #[tokio::test]
     async fn host_session_cancels_one_request_without_blocking_another() {
         let temp = TempDir::new().unwrap();
+        let request_start = temp.path().join("request-start");
+        let environment = BTreeMap::from([
+            (
+                OsString::from("CC_SSH_BRIDGE_TEST_MODE"),
+                OsString::from("1"),
+            ),
+            (
+                OsString::from("FAKE_SSH_REQUEST_START_FILE"),
+                request_start.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("FAKE_SSH_REQUEST_START_DELAY_SECONDS"),
+                OsString::from("0.05"),
+            ),
+        ]);
         let session = Arc::new(
             HostSession::connect_with(
                 policy(),
                 "test-host".to_owned(),
                 limits(),
                 OsString::from(fake_ssh(&temp)),
-                BTreeMap::new(),
+                environment,
                 CancellationToken::new(),
             )
             .await
@@ -1738,7 +1758,13 @@ mod tests {
                     .await
             })
         };
-        sleep(Duration::from_millis(50)).await;
+        timeout(Duration::from_secs(1), async {
+            while !request_start.exists() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("request did not reach the pre-PID cancellation window");
         cancel.cancel();
         let quick = timeout(
             Duration::from_secs(2),
