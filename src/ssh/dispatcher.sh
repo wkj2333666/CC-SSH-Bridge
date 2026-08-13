@@ -477,7 +477,7 @@ exit 0"
     [ -e "$run_stderr_marker" ] && run_stderr_truncated=1
     [ -e "$run_timeout_marker" ] && run_timed_out=1
     run_exit_file=$run_dir/exit
-    printf '%s\n%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" "$run_timed_out" >"$run_exit_file"
+    printf '%s\n%s\n%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" 0 "$run_timed_out" >"$run_exit_file"
     send_file EXIT "$run_id" "$run_exit_file"
     rm -rf "$run_dir"
 }

@@ -346,7 +346,7 @@ where
     let result = execute_request(&shared, &spec, &control);
     if let Ok((status, stdout_truncated, stderr_truncated, timed_out)) = result {
         let payload = format!(
-            "{status}\n{}\n{}\n{}\n",
+            "{status}\n{}\n{}\n0\n{}\n",
             u8::from(stdout_truncated),
             u8::from(stderr_truncated),
             u8::from(timed_out)

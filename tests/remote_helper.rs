@@ -157,8 +157,9 @@ fn helper_marks_its_own_watchdog_timeout_explicitly() {
         .unwrap()
         .lines()
         .collect::<Vec<_>>();
-    assert_eq!(fields.len(), 4);
-    assert_eq!(fields[3], "1");
+    assert_eq!(fields.len(), 5);
+    assert_eq!(fields[3], "0");
+    assert_eq!(fields[4], "1");
     send_frame(
         &mut input,
         Frame {
@@ -212,7 +213,7 @@ fn helper_preserves_streams_and_exit_status() {
     assert!(ready, "helper did not acknowledge request admission");
     assert_eq!(stdout, b"out");
     assert_eq!(stderr, b"err");
-    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n".as_slice()));
+    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n0\n".as_slice()));
     send_frame(
         &mut input,
         Frame {
@@ -275,7 +276,7 @@ fn helper_drains_beyond_output_limit_and_reports_truncation() {
         }
     };
     assert_eq!(stdout, b"123");
-    assert_eq!(exit, b"0\n1\n0\n0\n");
+    assert_eq!(exit, b"0\n1\n0\n0\n0\n");
     send_frame(
         &mut input,
         Frame {

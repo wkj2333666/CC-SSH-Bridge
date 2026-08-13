@@ -139,7 +139,7 @@ async fn dispatcher_executes_shell_command_and_preserves_streams_and_exit_status
     }
     assert_eq!(stdout_bytes, b"out");
     assert_eq!(stderr_bytes, b"err");
-    assert_eq!(exit.as_deref(), Some("7\n0\n0\n0\n"));
+    assert_eq!(exit.as_deref(), Some("7\n0\n0\n0\n0\n"));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let watchdog_pids = std::fs::read_to_string(&watchdog_log).unwrap();
     for pid in watchdog_pids.lines() {
