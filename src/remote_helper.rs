@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use memchr::{memchr, memchr_iter, memmem};
 
 use crate::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 
@@ -749,6 +750,7 @@ where
         return Err("search-root-not-directory".to_owned());
     }
     let globs = compile_globs(&spec.globs)?;
+    let finder = memmem::Finder::new(&spec.query);
     let deadline = (!spec.timeout.is_zero()).then(|| Instant::now() + spec.timeout);
     let mut paths = vec![spec.root.clone()];
     let mut stdout_seen = 0u64;
@@ -797,6 +799,7 @@ where
             let outcome = search_file(
                 &entry.path(),
                 &spec.query,
+                &finder,
                 spec.binary,
                 spec.max_results.saturating_sub(matched),
                 usize::try_from(spec.stdout_limit.saturating_sub(stdout_seen))
@@ -905,6 +908,7 @@ struct FoundMatch {
 fn search_file(
     path: &Path,
     query: &[u8],
+    finder: &memmem::Finder<'_>,
     binary: bool,
     max_results: usize,
     content_budget: usize,
@@ -923,14 +927,13 @@ fn search_file(
         _ => "search-file-open-failed".to_owned(),
     })?;
     let mut reader = BufReader::with_capacity(STREAM_BUFFER_BYTES, file);
-    let prefix = kmp_prefix(query);
     let mut matches = Vec::new();
     let mut line = Vec::new();
+    let mut overlap = Vec::with_capacity(query.len().saturating_sub(1));
+    let mut boundary = Vec::with_capacity(query.len().saturating_sub(1).saturating_mul(2));
     let mut line_number = 1u64;
     let mut line_bytes = 0usize;
-    let mut match_state = 0usize;
     let mut first_column = None;
-    let mut binary_file = false;
     let mut output_truncated = false;
     let mut timed_out = false;
     let content_budget = content_budget.min(u32::MAX as usize);
@@ -964,61 +967,178 @@ fn search_file(
             break;
         }
         let consumed = buffer.len();
-        for &byte in buffer {
-            if byte == 0 {
-                binary_file = true;
+        let mut segment_start = 0usize;
+        for newline in memchr_iter(b'\n', buffer) {
+            scan_search_segment(
+                &buffer[segment_start..newline],
+                query.len(),
+                finder,
+                &mut line,
+                &mut line_bytes,
+                &mut first_column,
+                &mut overlap,
+                &mut boundary,
+                content_budget.saturating_sub(retained_content),
+            );
+            finish_search_line(
+                &mut matches,
+                line_number,
+                first_column,
+                &line,
+                line_bytes,
+                content_budget,
+                &mut retained_content,
+                max_results,
+                &mut output_truncated,
+            );
+            if binary && (matches.len() >= max_results || output_truncated) {
+                break;
             }
-            if byte == b'\n' {
-                finish_search_line(
-                    &mut matches,
-                    line_number,
-                    first_column,
-                    &line,
-                    line_bytes,
-                    content_budget,
-                    &mut retained_content,
-                    max_results,
-                    &mut output_truncated,
-                );
-                if binary && (matches.len() >= max_results || output_truncated) {
-                    break;
-                }
-                line.clear();
-                line_bytes = 0;
-                line_number = line_number.saturating_add(1);
-                match_state = 0;
-                first_column = None;
-                continue;
-            }
-            if line.len() < content_budget.saturating_sub(retained_content) {
-                line.push(byte);
-            }
-            line_bytes = line_bytes.saturating_add(1);
-            while match_state > 0 && query[match_state] != byte {
-                match_state = prefix[match_state - 1];
-            }
-            if query[match_state] == byte {
-                match_state += 1;
-                if match_state == query.len() {
-                    first_column.get_or_insert(line_bytes.saturating_sub(query.len()) + 1);
-                    match_state = prefix[match_state - 1];
-                }
-            }
+            line.clear();
+            overlap.clear();
+            boundary.clear();
+            line_bytes = 0;
+            line_number = line_number.saturating_add(1);
+            first_column = None;
+            segment_start = newline.saturating_add(1);
+        }
+        if !(binary && (matches.len() >= max_results || output_truncated)) {
+            scan_search_segment(
+                &buffer[segment_start..],
+                query.len(),
+                finder,
+                &mut line,
+                &mut line_bytes,
+                &mut first_column,
+                &mut overlap,
+                &mut boundary,
+                content_budget.saturating_sub(retained_content),
+            );
         }
         reader.consume(consumed);
         if binary && (matches.len() >= max_results || output_truncated) {
             break;
         }
     }
-    if binary_file && !binary {
-        matches.clear();
-        output_truncated = false;
+    if !binary && !matches.is_empty() && !timed_out {
+        let binary_check = file_contains_nul(path, control, deadline)?;
+        timed_out |= binary_check.timed_out;
+        if binary_check.contains_nul {
+            matches.clear();
+            output_truncated = false;
+        }
     }
     Ok(FileSearchOutcome {
         matches,
         output_truncated,
         timed_out,
     })
+}
+
+struct BinaryCheck {
+    contains_nul: bool,
+    timed_out: bool,
+}
+
+fn file_contains_nul(
+    path: &Path,
+    control: &RequestControl,
+    deadline: Option<Instant>,
+) -> Result<BinaryCheck, String> {
+    let file = std::fs::File::open(path).map_err(|_| "search-file-open-failed".to_owned())?;
+    let mut reader = BufReader::with_capacity(STREAM_BUFFER_BYTES, file);
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: false,
+            });
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: true,
+            });
+        }
+        let buffer = reader
+            .fill_buf()
+            .map_err(|_| "search-file-read-failed".to_owned())?;
+        if buffer.is_empty() {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: false,
+            });
+        }
+        let consumed = buffer.len();
+        if memchr(0, buffer).is_some() {
+            return Ok(BinaryCheck {
+                contains_nul: true,
+                timed_out: false,
+            });
+        }
+        reader.consume(consumed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_search_segment(
+    segment: &[u8],
+    query_length: usize,
+    finder: &memmem::Finder<'_>,
+    line: &mut Vec<u8>,
+    line_bytes: &mut usize,
+    first_column: &mut Option<usize>,
+    overlap: &mut Vec<u8>,
+    boundary: &mut Vec<u8>,
+    line_content_budget: usize,
+) {
+    let retained = line_content_budget.saturating_sub(line.len());
+    line.extend_from_slice(&segment[..segment.len().min(retained)]);
+
+    if first_column.is_none() {
+        if !overlap.is_empty() {
+            boundary.clear();
+            boundary.extend_from_slice(overlap);
+            boundary
+                .extend_from_slice(&segment[..segment.len().min(query_length.saturating_sub(1))]);
+            if let Some(index) = finder.find(boundary)
+                && index < overlap.len()
+                && index.saturating_add(query_length) > overlap.len()
+            {
+                *first_column = Some(
+                    line_bytes
+                        .saturating_sub(overlap.len())
+                        .saturating_add(index)
+                        .saturating_add(1),
+                );
+            }
+        }
+        if first_column.is_none()
+            && let Some(index) = finder.find(segment)
+        {
+            *first_column = Some(line_bytes.saturating_add(index).saturating_add(1));
+        }
+    }
+    *line_bytes = line_bytes.saturating_add(segment.len());
+
+    if first_column.is_some() {
+        overlap.clear();
+        return;
+    }
+    let overlap_limit = query_length.saturating_sub(1);
+    if segment.len() >= overlap_limit {
+        overlap.clear();
+        overlap.extend_from_slice(&segment[segment.len().saturating_sub(overlap_limit)..]);
+    } else {
+        let excess = overlap
+            .len()
+            .saturating_add(segment.len())
+            .saturating_sub(overlap_limit);
+        if excess > 0 {
+            overlap.drain(..excess);
+        }
+        overlap.extend_from_slice(segment);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1047,21 +1167,6 @@ fn finish_search_line(
         column: u64::try_from(column).unwrap_or(u64::MAX),
         content: content.to_vec(),
     });
-}
-
-fn kmp_prefix(query: &[u8]) -> Vec<usize> {
-    let mut prefix = vec![0; query.len()];
-    let mut matched = 0usize;
-    for index in 1..query.len() {
-        while matched > 0 && query[index] != query[matched] {
-            matched = prefix[matched - 1];
-        }
-        if query[index] == query[matched] {
-            matched += 1;
-            prefix[index] = matched;
-        }
-    }
-    prefix
 }
 
 fn encode_search_match(
@@ -1222,4 +1327,48 @@ fn machine_arch() -> String {
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> io::Error {
     io::Error::other("helper synchronization lock poisoned")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vectorized_search_preserves_matches_across_read_buffers() {
+        let query = b"needle";
+        let finder = memmem::Finder::new(query);
+        let mut line = Vec::new();
+        let mut line_bytes = 0;
+        let mut first_column = None;
+        let mut overlap = Vec::new();
+        let mut boundary = Vec::new();
+
+        scan_search_segment(
+            b"aaa nee",
+            query.len(),
+            &finder,
+            &mut line,
+            &mut line_bytes,
+            &mut first_column,
+            &mut overlap,
+            &mut boundary,
+            1024,
+        );
+        assert_eq!(first_column, None);
+        scan_search_segment(
+            b"dle z",
+            query.len(),
+            &finder,
+            &mut line,
+            &mut line_bytes,
+            &mut first_column,
+            &mut overlap,
+            &mut boundary,
+            1024,
+        );
+
+        assert_eq!(first_column, Some(5));
+        assert_eq!(line_bytes, 12);
+        assert_eq!(line, b"aaa needle z");
+    }
 }
