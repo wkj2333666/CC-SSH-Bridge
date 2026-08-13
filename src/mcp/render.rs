@@ -7,10 +7,13 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, ErrorCode, ErrorDetails, ErrorShellMetadata};
+use crate::job_protocol::{JobLogEncoding, JobLogPage, JobStateRecord};
 use crate::remote::{
     AggregateKind, ApplyPatchResult, EncodedValue, HostsResult, ListResult, OutputReadResult,
-    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteRunResult, RetentionProvenance,
-    SearchEngine, SearchResult, ShellMetadata, ShellName, StatResult, ValueEncoding, WriteResult,
+    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteJobDeleteResult, RemoteJobListResult,
+    RemoteJobLogsResult, RemoteJobStartResult, RemoteJobStatusResult, RemoteRunResult,
+    RetentionProvenance, SearchEngine, SearchResult, ShellMetadata, ShellName, StatResult,
+    ValueEncoding, WriteResult,
 };
 
 use super::{CallToolResult, TextContent, WireBudget};
@@ -26,6 +29,7 @@ pub fn maximum_compact_fallback_result_bytes() -> usize {
         let mut error = BridgeError::new(ErrorCode::MutationOutcomeUnknown, &hostile, false);
         error.details = ErrorDetails {
             host: Some("h".repeat(128)),
+            job_id: Some("f".repeat(32)),
             shell: Some(ErrorShellMetadata {
                 kind: "bash".to_owned(),
                 version: Some("?".repeat(256)),
@@ -450,6 +454,218 @@ pub async fn run(
     }
 }
 
+pub fn job_start(
+    result: Result<RemoteJobStartResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => budgeted_compact_result(
+            json!({"job_id":result.job_id, "state":result.state}),
+            false,
+            budget,
+        ),
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn job_status(
+    result: Result<RemoteJobStatusResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => budgeted_compact_result(job_status_metadata(&result.record), false, budget),
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn job_delete(
+    result: Result<RemoteJobDeleteResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => budgeted_compact_result(
+            json!({"job_id":result.job_id, "deleted":true}),
+            false,
+            budget,
+        ),
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn job_list(
+    result: Result<RemoteJobListResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => return render_error(error, budget),
+    };
+    let count = result.jobs.len();
+    let mut returned_count = count;
+    loop {
+        let text = result.jobs[..returned_count]
+            .iter()
+            .map(|job| serde_json::to_string(job).expect("Job summaries are serializable"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let metadata = json!({
+            "count":count,
+            "returned_count":returned_count,
+            "truncated":returned_count != count,
+        });
+        let rendered = CallToolResult {
+            content: vec![TextContent::new(text)],
+            structured_content: metadata.clone(),
+            is_error: false,
+        };
+        if serialized_at_most(&rendered, total_budget(budget)) {
+            return rendered;
+        }
+        if returned_count == 0 {
+            return budgeted_compact_result(metadata, false, budget);
+        }
+        returned_count /= 2;
+    }
+}
+
+pub fn job_logs(
+    result: Result<RemoteJobLogsResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => return render_error(error, budget),
+    };
+    let stdout = match decode_job_log(&result.logs.stdout) {
+        Ok(value) => value,
+        Err(()) => return render_error(invalid_job_log_page(), budget),
+    };
+    let stderr = match decode_job_log(&result.logs.stderr) {
+        Ok(value) => value,
+        Err(()) => return render_error(invalid_job_log_page(), budget),
+    };
+    let stdout_start = result
+        .logs
+        .stdout
+        .next_offset
+        .saturating_sub(stdout.len() as u64);
+    let stderr_start = result
+        .logs
+        .stderr
+        .next_offset
+        .saturating_sub(stderr.len() as u64);
+    let mut stdout_len = stdout.len();
+    let mut stderr_len = stderr.len();
+    loop {
+        stdout_len = log_prefix_len(&stdout, stdout_len, result.logs.stdout.encoding);
+        stderr_len = log_prefix_len(&stderr, stderr_len, result.logs.stderr.encoding);
+        let stdout_value = render_job_log(&stdout[..stdout_len], result.logs.stdout.encoding);
+        let stderr_value = render_job_log(&stderr[..stderr_len], result.logs.stderr.encoding);
+        let text = job_logs_text(&stdout_value, &stderr_value);
+        let stdout_complete = stdout_len == stdout.len();
+        let stderr_complete = stderr_len == stderr.len();
+        let metadata = json!({
+            "job_id":result.logs.job_id.clone(),
+            "state":result.logs.state,
+            "stdout_next_offset":stdout_start.saturating_add(stdout_len as u64),
+            "stderr_next_offset":stderr_start.saturating_add(stderr_len as u64),
+            "stdout_eof":result.logs.stdout.eof && stdout_complete,
+            "stderr_eof":result.logs.stderr.eof && stderr_complete,
+            "stdout_truncated":result.logs.stdout.truncated,
+            "stderr_truncated":result.logs.stderr.truncated,
+        });
+        let rendered = CallToolResult {
+            content: vec![TextContent::new(text)],
+            structured_content: metadata.clone(),
+            is_error: false,
+        };
+        if serialized_at_most(&rendered, total_budget(budget)) {
+            return rendered;
+        }
+        if stdout_len == 0 && stderr_len == 0 {
+            return budgeted_compact_result(metadata, false, budget);
+        }
+        stdout_len /= 2;
+        stderr_len /= 2;
+    }
+}
+
+fn job_status_metadata(record: &JobStateRecord) -> Value {
+    let mut metadata = object(json!({
+        "job_id":record.job_id,
+        "state":record.state,
+        "stdout_retained_bytes":record.stdout_retained_bytes,
+        "stdout_observed_bytes":record.stdout_observed_bytes,
+        "stderr_retained_bytes":record.stderr_retained_bytes,
+        "stderr_observed_bytes":record.stderr_observed_bytes,
+        "stdout_truncated":record.stdout_truncated,
+        "stderr_truncated":record.stderr_truncated,
+    }));
+    for (key, value) in [
+        ("started_unix_ms", record.started_unix_ms),
+        ("finished_unix_ms", record.finished_unix_ms),
+    ] {
+        if let Some(value) = value {
+            metadata.insert(key.to_owned(), Value::from(value));
+        }
+    }
+    if let Some(exit_code) = record.exit_code {
+        metadata.insert("exit_code".to_owned(), Value::from(exit_code));
+    }
+    if let Some(signal) = record.signal {
+        metadata.insert("signal".to_owned(), Value::from(signal));
+    }
+    Value::Object(metadata)
+}
+
+fn decode_job_log(page: &JobLogPage) -> Result<Vec<u8>, ()> {
+    match page.encoding {
+        JobLogEncoding::Utf8 => Ok(page.value.as_bytes().to_vec()),
+        JobLogEncoding::Base64 => base64::engine::general_purpose::STANDARD
+            .decode(page.value.as_bytes())
+            .map_err(|_| ()),
+    }
+}
+
+fn invalid_job_log_page() -> BridgeError {
+    BridgeError::new(
+        ErrorCode::ProtocolError,
+        "remote Job log page was not valid Base64",
+        false,
+    )
+}
+
+fn log_prefix_len(bytes: &[u8], requested: usize, encoding: JobLogEncoding) -> usize {
+    let mut length = requested.min(bytes.len());
+    if encoding == JobLogEncoding::Utf8 {
+        while length > 0 && std::str::from_utf8(&bytes[..length]).is_err() {
+            length -= 1;
+        }
+    }
+    length
+}
+
+fn render_job_log(bytes: &[u8], encoding: JobLogEncoding) -> String {
+    match encoding {
+        JobLogEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        JobLogEncoding::Base64 => format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ),
+    }
+}
+
+fn job_logs_text(stdout: &str, stderr: &str) -> String {
+    let mut sections = Vec::new();
+    if !stdout.is_empty() {
+        sections.push(format!("stdout:\n{stdout}"));
+    }
+    if !stderr.is_empty() {
+        sections.push(format!("stderr:\n{stderr}"));
+    }
+    sections.join("\n")
+}
+
 async fn retained_remote<T>(
     bridge: Arc<RemoteBridge>,
     result: T,
@@ -594,6 +810,7 @@ fn render_error_borrowed_with_progress(
         .map_or((None, false), |(action, truncated)| {
             (Some(action), truncated)
         });
+    let job_id = safe_optional(details.job_id.as_deref());
     let context = rendered_error_context(details);
     let warnings = context
         .as_ref()
@@ -622,6 +839,7 @@ fn render_error_borrowed_with_progress(
     };
     let document = RenderedErrorDocument {
         context: context.clone(),
+        job_id: job_id.as_deref(),
         status: progress.status,
         error: &core,
         action: action.as_deref(),
@@ -632,6 +850,7 @@ fn render_error_borrowed_with_progress(
     let text = serde_json::to_string(&document).expect("error projection is serializable");
     let structured = RenderedErrorDocument {
         context,
+        job_id: job_id.as_deref(),
         status: progress.status,
         error: &core,
         action: action.as_deref(),
@@ -767,6 +986,7 @@ fn render_full_error(error: &mut BridgeError, budget: WireBudget) -> Option<Call
         .unwrap_or_default();
     let document = FullErrorDocument {
         context,
+        job_id: safe_optional(details.job_id.as_deref()),
         status: mutation_status(details),
         error: FullErrorCore {
             code: error.code,
@@ -1200,6 +1420,8 @@ struct RenderedErrorDocument<'a> {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     context: Option<RenderedContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<&'static str>,
     error: &'a RenderedErrorCore,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1228,6 +1450,8 @@ struct RetainedMutationErrorDetail {
 struct FullErrorDocument<'a> {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     context: Option<RenderedContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<&'static str>,
     error: FullErrorCore<'a>,
@@ -1784,5 +2008,66 @@ mod tests {
         assert_eq!(page.data.encoding, ValueEncoding::Utf8);
         assert_eq!(page.data.value, expected);
         assert!(page.eof);
+    }
+
+    #[test]
+    fn task15_job_log_wire_truncation_preserves_the_next_unseen_offset() {
+        let job_id = crate::job_protocol::JobId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let rendered = result_value(job_logs(
+            Ok(RemoteJobLogsResult {
+                host: "dev".to_owned(),
+                logs: crate::job_protocol::JobLogsResponse {
+                    job_id,
+                    state: crate::job_protocol::JobState::Running,
+                    stdout: JobLogPage {
+                        encoding: JobLogEncoding::Utf8,
+                        value: "x".repeat(16 * 1024),
+                        next_offset: 16 * 1024,
+                        eof: true,
+                        retained_bytes: 16 * 1024,
+                        observed_bytes: 16 * 1024,
+                        truncated: false,
+                    },
+                    stderr: JobLogPage {
+                        encoding: JobLogEncoding::Utf8,
+                        value: String::new(),
+                        next_offset: 0,
+                        eof: true,
+                        retained_bytes: 0,
+                        observed_bytes: 0,
+                        truncated: false,
+                    },
+                },
+            }),
+            WireBudget {
+                result_bytes: 4 * 1024,
+                compact_fallback_bytes: 8 * 1024,
+            },
+        ));
+        let next = rendered["structuredContent"]["stdout_next_offset"]
+            .as_u64()
+            .unwrap();
+        assert!(next > 0 && next < 16 * 1024, "{rendered}");
+        assert_eq!(rendered["structuredContent"]["stdout_eof"], false);
+        assert!(
+            rendered["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("stdout:\n")
+        );
+    }
+
+    #[test]
+    fn task15_job_errors_expose_only_the_known_job_identity() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut error = BridgeError::new(
+            ErrorCode::JobStartOutcomeUnknown,
+            "remote Job start outcome could not be confirmed",
+            false,
+        );
+        error.details.job_id = Some(id.to_owned());
+        let rendered = result_value(render_error(error, roomy_budget()));
+        assert_eq!(rendered["structuredContent"]["job_id"], id);
+        assert!(rendered["structuredContent"].get("action").is_none());
     }
 }

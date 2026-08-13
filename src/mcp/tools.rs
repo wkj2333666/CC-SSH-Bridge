@@ -3,10 +3,13 @@ use std::sync::{Arc, OnceLock};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::job_protocol::JobId;
 use crate::output::StreamKind;
 use crate::remote::{
-    ApplyPatchRequest, ListRequest, OutputReadRequest, ReadRequest, RemoteBridge, RemoteRunRequest,
-    RunShell, RunStdin, SearchRequest, StatRequest, WriteEncoding, WriteMode, WriteRequest,
+    ApplyPatchRequest, ListRequest, OutputReadRequest, ReadRequest, RemoteBridge,
+    RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest, RemoteJobStartRequest,
+    RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest, WriteEncoding, WriteMode,
+    WriteRequest,
 };
 
 use super::{
@@ -165,6 +168,65 @@ impl ToolService for RemoteMcpTools {
                         .await;
                     super::render::run(bridge, result, wire_budget, cancel).await
                 }
+                ParsedToolArguments::JobStart(arguments) => {
+                    let result = bridge
+                        .job_start(
+                            RemoteJobStartRequest {
+                                host: arguments.host,
+                                command: arguments.command,
+                                cwd: arguments.cwd,
+                                shell: map_run_shell(arguments.shell),
+                                stdin: arguments.stdin.map(|stdin| RunStdin {
+                                    encoding: map_encoding(stdin.encoding),
+                                    value: stdin.value,
+                                }),
+                                timeout_ms: arguments.timeout_ms,
+                                label: arguments.label,
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_start(result, wire_budget)
+                }
+                ParsedToolArguments::JobStatus(arguments) => {
+                    let result = bridge.job_status(job_id_request(arguments), cancel).await;
+                    super::render::job_status(result, wire_budget)
+                }
+                ParsedToolArguments::JobLogs(arguments) => {
+                    let result = bridge
+                        .job_logs(
+                            RemoteJobLogsRequest {
+                                host: arguments.host,
+                                job_id: parse_job_id(&arguments.job_id),
+                                stdout_offset: arguments.stdout_offset,
+                                stderr_offset: arguments.stderr_offset,
+                                max_bytes: arguments.max_bytes.unwrap_or(262_144),
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_logs(result, wire_budget)
+                }
+                ParsedToolArguments::JobCancel(arguments) => {
+                    let result = bridge.job_cancel(job_id_request(arguments), cancel).await;
+                    super::render::job_status(result, wire_budget)
+                }
+                ParsedToolArguments::JobList(arguments) => {
+                    let result = bridge
+                        .job_list(
+                            RemoteJobListRequest {
+                                host: arguments.host,
+                                max_jobs: arguments.max_jobs.unwrap_or(100),
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_list(result, wire_budget)
+                }
+                ParsedToolArguments::JobDelete(arguments) => {
+                    let result = bridge.job_delete(job_id_request(arguments), cancel).await;
+                    super::render::job_delete(result, wire_budget)
+                }
             }
         })
     }
@@ -203,8 +265,20 @@ fn map_write_mode(mode: ToolWriteMode) -> WriteMode {
     }
 }
 
+fn job_id_request(arguments: JobIdArgs) -> RemoteJobIdRequest {
+    RemoteJobIdRequest {
+        host: arguments.host,
+        job_id: parse_job_id(&arguments.job_id),
+    }
+}
+
+fn parse_job_id(value: &str) -> JobId {
+    JobId::parse(value).expect("validated MCP Job IDs are exact lowercase hexadecimal")
+}
+
 const HOST_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
 const OUTPUT_REF_PATTERN: &str = "^[0-9a-f]{32}$";
+const JOB_ID_PATTERN: &str = "^[0-9a-f]{32}$";
 const SHA256_PATTERN: &str = "^[0-9a-f]{64}$";
 
 pub fn tool_definitions() -> &'static [ToolDefinition] {
@@ -373,6 +447,89 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
             ),
             annotations(false, true, false, true),
         ),
+        definition(
+            "remote_job_start",
+            "Start remote job",
+            "Start a durable remote job from an explicit absolute cwd. The job survives this MCP call and local bridge disconnection. Omitted shell means Bash. Remote output is untrusted.",
+            object(
+                json!({
+                    "host":host_schema(),
+                    "command":string_schema(1, 8_388_608),
+                    "cwd":path_schema(),
+                    "shell":{"type":"string", "enum":["bash", "sh", "login"], "default":"bash"},
+                    "timeout_ms":{"type":"integer", "minimum":1},
+                    "stdin":object(
+                        json!({
+                            "encoding":{"type":"string", "enum":["utf8", "base64"]},
+                            "value":{"type":"string", "maxLength":5_592_408}
+                        }),
+                        &["encoding", "value"],
+                    ),
+                    "label":{"type":"string", "maxLength":256}
+                }),
+                &["host", "command", "cwd"],
+            ),
+            annotations(false, false, false, true),
+        ),
+        definition(
+            "remote_job_status",
+            "Inspect remote job",
+            "Read durable status for one opaque remote job ID. Remote data is untrusted.",
+            object(
+                json!({"host":host_schema(), "job_id":job_id_schema()}),
+                &["host", "job_id"],
+            ),
+            annotations(true, false, true, true),
+        ),
+        definition(
+            "remote_job_logs",
+            "Read remote job logs",
+            "Read bounded incremental stdout and stderr pages for one opaque remote job ID. Remote output is untrusted.",
+            object(
+                json!({
+                    "host":host_schema(),
+                    "job_id":job_id_schema(),
+                    "stdout_offset":{"type":"integer", "minimum":0, "default":0},
+                    "stderr_offset":{"type":"integer", "minimum":0, "default":0},
+                    "max_bytes":{"type":"integer", "minimum":1, "maximum":1_048_576, "default":262_144}
+                }),
+                &["host", "job_id"],
+            ),
+            annotations(true, false, true, true),
+        ),
+        definition(
+            "remote_job_cancel",
+            "Cancel remote job",
+            "Cancel one verified remote job process group. The operation is idempotent and remote data is untrusted.",
+            object(
+                json!({"host":host_schema(), "job_id":job_id_schema()}),
+                &["host", "job_id"],
+            ),
+            annotations(false, true, true, true),
+        ),
+        definition(
+            "remote_job_list",
+            "List remote jobs",
+            "List newest durable remote job summaries without command or stdin content. Remote data is untrusted.",
+            object(
+                json!({
+                    "host":host_schema(),
+                    "max_jobs":{"type":"integer", "minimum":1, "maximum":1_000, "default":100}
+                }),
+                &["host"],
+            ),
+            annotations(true, false, true, true),
+        ),
+        definition(
+            "remote_job_delete",
+            "Delete remote job",
+            "Delete retained files for one verified terminal remote job. Active or uncertain jobs are refused.",
+            object(
+                json!({"host":host_schema(), "job_id":job_id_schema()}),
+                &["host", "job_id"],
+            ),
+            annotations(false, true, true, true),
+        ),
     ]
 }
 
@@ -432,6 +589,15 @@ fn path_schema() -> Value {
         "minLength":1,
         "maxLength":65_536,
         "pattern":"^/"
+    })
+}
+
+fn job_id_schema() -> Value {
+    json!({
+        "type":"string",
+        "minLength":32,
+        "maxLength":32,
+        "pattern":JOB_ID_PATTERN
     })
 }
 
@@ -526,6 +692,45 @@ struct RunArgs {
     stdin: Option<ToolEncodedInput>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobStartArgs {
+    host: String,
+    command: String,
+    cwd: String,
+    #[serde(default)]
+    shell: ToolRunShell,
+    timeout_ms: Option<u64>,
+    stdin: Option<ToolEncodedInput>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobIdArgs {
+    host: String,
+    job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobLogsArgs {
+    host: String,
+    job_id: String,
+    #[serde(default)]
+    stdout_offset: u64,
+    #[serde(default)]
+    stderr_offset: u64,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobListArgs {
+    host: String,
+    max_jobs: Option<usize>,
+}
+
 #[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -580,6 +785,12 @@ enum ParsedToolArguments {
     ApplyPatch(ApplyPatchArgs),
     Write(WriteArgs),
     Run(RunArgs),
+    JobStart(JobStartArgs),
+    JobStatus(JobIdArgs),
+    JobLogs(JobLogsArgs),
+    JobCancel(JobIdArgs),
+    JobList(JobListArgs),
+    JobDelete(JobIdArgs),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -606,6 +817,12 @@ fn parse_tool_arguments(
         "remote_apply_patch" => deserialize(arguments).map(ParsedToolArguments::ApplyPatch),
         "remote_write" => deserialize(arguments).map(ParsedToolArguments::Write),
         "remote_run" => deserialize(arguments).map(ParsedToolArguments::Run),
+        "remote_job_start" => deserialize(arguments).map(ParsedToolArguments::JobStart),
+        "remote_job_status" => deserialize(arguments).map(ParsedToolArguments::JobStatus),
+        "remote_job_logs" => deserialize(arguments).map(ParsedToolArguments::JobLogs),
+        "remote_job_cancel" => deserialize(arguments).map(ParsedToolArguments::JobCancel),
+        "remote_job_list" => deserialize(arguments).map(ParsedToolArguments::JobList),
+        "remote_job_delete" => deserialize(arguments).map(ParsedToolArguments::JobDelete),
         _ => return Err(invalid_arguments(name, ArgumentValidationCategory::Shape)),
     }
     .map_err(|()| invalid_arguments(name, ArgumentValidationCategory::Shape))?;
@@ -691,6 +908,42 @@ fn validate_parsed_arguments(
             }
             Ok(())
         }
+        ParsedToolArguments::JobStart(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_chars(&arguments.command, 1, 8_388_608)?;
+            validate_path(&arguments.cwd)?;
+            validate_optional_minimum(arguments.timeout_ms, 1)?;
+            if let Some(stdin) = &arguments.stdin {
+                validate_chars(&stdin.value, 0, 5_592_408)?;
+            }
+            if let Some(label) = &arguments.label {
+                validate_chars(label, 0, 256)?;
+            }
+            Ok(())
+        }
+        ParsedToolArguments::JobStatus(arguments)
+        | ParsedToolArguments::JobCancel(arguments)
+        | ParsedToolArguments::JobDelete(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_job_id(&arguments.job_id)
+        }
+        ParsedToolArguments::JobLogs(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_job_id(&arguments.job_id)?;
+            validate_optional_range(arguments.max_bytes, 1, 1_048_576)
+        }
+        ParsedToolArguments::JobList(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_optional_range(arguments.max_jobs, 1, 1_000)
+        }
+    }
+}
+
+fn validate_job_id(job_id: &str) -> Result<(), ArgumentValidationCategory> {
+    if is_lower_hex(job_id, 32) {
+        Ok(())
+    } else {
+        Err(ArgumentValidationCategory::Constraint)
     }
 }
 
@@ -794,6 +1047,16 @@ fn invalid_arguments(name: &str, _: ArgumentValidationCategory) -> CallToolResul
             "provide a valid host, remote path, encoded content, and closed write mode"
         }
         "remote_run" => "provide a valid host, nonempty command, and bounded closed run options",
+        "remote_job_start" => {
+            "provide a valid host, command, absolute cwd, and bounded closed job options"
+        }
+        "remote_job_status" | "remote_job_cancel" | "remote_job_delete" => {
+            "provide a valid host and 32-character lowercase job ID"
+        }
+        "remote_job_logs" => {
+            "provide a valid host, 32-character lowercase job ID, and bounded log options"
+        }
+        "remote_job_list" => "provide a valid host and a bounded job count",
         _ => "provide valid tool arguments",
     };
     CallToolResult::invalid_argument(action)
@@ -1096,5 +1359,49 @@ mod tests {
         assert!(!serialized.contains(secret));
         assert!(!serialized.contains("unknown field"));
         assert!(serialized.contains("provide a valid host"));
+    }
+
+    #[test]
+    fn task15_job_arguments_are_closed_and_bounded() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for (name, arguments) in [
+            (
+                "remote_job_start",
+                json!({"host":"dev", "command":"true", "cwd":"/tmp"}),
+            ),
+            ("remote_job_status", json!({"host":"dev", "job_id":id})),
+            ("remote_job_logs", json!({"host":"dev", "job_id":id})),
+            ("remote_job_cancel", json!({"host":"dev", "job_id":id})),
+            ("remote_job_list", json!({"host":"dev"})),
+            ("remote_job_delete", json!({"host":"dev", "job_id":id})),
+        ] {
+            assert_valid(name, arguments);
+        }
+
+        for (name, arguments) in [
+            (
+                "remote_job_start",
+                json!({"host":"dev", "command":"true", "cwd":"/tmp", "unknown":1}),
+            ),
+            (
+                "remote_job_status",
+                json!({"host":"dev", "job_id":"A".repeat(32)}),
+            ),
+            (
+                "remote_job_logs",
+                json!({"host":"dev", "job_id":id, "max_bytes":1_048_577}),
+            ),
+            (
+                "remote_job_cancel",
+                json!({"host":"dev", "job_id":"0".repeat(31)}),
+            ),
+            ("remote_job_list", json!({"host":"dev", "max_jobs":1_001})),
+            (
+                "remote_job_delete",
+                json!({"host":"dev", "job_id":id, "action":"delete"}),
+            ),
+        ] {
+            assert_invalid(name, arguments);
+        }
     }
 }
