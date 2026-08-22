@@ -143,6 +143,21 @@ pub fn known_human_mode(value: &std::ffi::OsStr) -> bool {
     )
 }
 
+/// Upper bound for the human-facing fatal detail line appended after the
+/// stable error code, keeping pathological messages bounded on stderr.
+const MAX_FATAL_DETAIL_BYTES: usize = 512;
+
+pub fn fatal_detail(message: &str) -> &str {
+    if message.len() <= MAX_FATAL_DETAIL_BYTES {
+        return message;
+    }
+    let mut end = MAX_FATAL_DETAIL_BYTES;
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message[..end]
+}
+
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(std::iter::once(OsString::from("cc-ssh-bridge")).chain(arguments))
 }
@@ -1001,5 +1016,26 @@ mod sshfs_identity_tests {
 
         assert!(status.sshfs);
         assert_eq!(status.mount_id, Some(41));
+    }
+
+    #[test]
+    fn fatal_detail_passes_short_messages_through_unmodified() {
+        assert_eq!(
+            fatal_detail("recorded installation identity differs from this bundle"),
+            "recorded installation identity differs from this bundle"
+        );
+        assert_eq!(fatal_detail(""), "");
+    }
+
+    #[test]
+    fn fatal_detail_bounds_long_messages_on_a_char_boundary() {
+        let ascii = "x".repeat(super::MAX_FATAL_DETAIL_BYTES + 64);
+        assert_eq!(fatal_detail(&ascii).len(), super::MAX_FATAL_DETAIL_BYTES);
+
+        let multibyte = "界".repeat(super::MAX_FATAL_DETAIL_BYTES);
+        let detail = fatal_detail(&multibyte);
+        assert!(detail.len() <= super::MAX_FATAL_DETAIL_BYTES);
+        assert!(!detail.is_empty());
+        assert!(detail.chars().all(|character| character == '界'));
     }
 }

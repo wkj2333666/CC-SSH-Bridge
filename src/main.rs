@@ -15,6 +15,10 @@ const FATAL_PREFIX: &str = "cc-ssh-bridge fatal: ";
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--version") | Some("-V")) {
+        println!("cc-ssh-bridge {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if arguments.len() == 1 && arguments[0] == std::ffi::OsStr::new("mcp") {
         if let Err(error) = run_mcp().await {
             eprintln!("{FATAL_PREFIX}{}", stable_error_code(error.code));
@@ -38,7 +42,14 @@ async fn main() {
         }
     };
     if let Err(error) = cli::run(parsed).await {
-        eprintln!("{FATAL_PREFIX}{}", stable_error_code(error.code));
+        // Human-facing CLI failures may explain themselves; only the
+        // machine-facing mcp mode keeps the bare stable error code.
+        let detail = cli::fatal_detail(&error.message);
+        if detail.is_empty() {
+            eprintln!("{FATAL_PREFIX}{}", stable_error_code(error.code));
+        } else {
+            eprintln!("{FATAL_PREFIX}{}: {detail}", stable_error_code(error.code));
+        }
         std::process::exit(1);
     }
 }

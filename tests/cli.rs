@@ -45,6 +45,52 @@ fn task9_help_lists_human_commands_while_mcp_remains_an_entry_mode() {
 }
 
 #[test]
+fn version_flag_prints_the_package_version_without_entering_a_mode() {
+    Command::new(env!("CARGO_BIN_EXE_cc-ssh-bridge"))
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::eq(format!(
+            "cc-ssh-bridge {}\n",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+    Command::new(env!("CARGO_BIN_EXE_cc-ssh-bridge"))
+        .arg("-V")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("cc-ssh-bridge "));
+}
+
+#[test]
+fn cli_fatal_failures_include_the_stable_code_and_detail_message() {
+    // A missing configuration file is a deterministic CLI-mode IO failure; the
+    // human path must name the stable code and append the concrete reason.
+    let private = tempfile::TempDir::new().unwrap();
+    let missing = private.path().join("absent-config.toml");
+    Command::new(env!("CARGO_BIN_EXE_cc-ssh-bridge"))
+        .arg("hosts")
+        .arg("list")
+        .env("CC_SSH_BRIDGE_CONFIG", &missing)
+        .assert()
+        .failure()
+        .stderr(predicate::str::starts_with("cc-ssh-bridge fatal: "))
+        .stderr(predicate::str::contains("fatal: IO: "));
+
+    // Machine-facing mcp mode keeps printing only the stable error code even
+    // when a detailed reason is available.
+    let unsupported = private.path().join("unsupported-version.toml");
+    fs::write(&unsupported, b"version = 1\n").unwrap();
+    fs::set_permissions(&unsupported, fs::Permissions::from_mode(0o600)).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_cc-ssh-bridge"))
+        .arg("mcp")
+        .env("CC_SSH_BRIDGE_CONFIG", &unsupported)
+        .assert()
+        .failure()
+        .stderr(predicate::str::eq("cc-ssh-bridge fatal: INVALID_CONFIG\n"));
+}
+
+#[test]
 fn hosts_list_discovers_every_concrete_alias_without_policy_fields() {
     let private = tempfile::TempDir::new().unwrap();
     let config = private.path().join("config.toml");
