@@ -50,10 +50,9 @@ fn version_flag_prints_the_package_version_without_entering_a_mode() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::eq(format!(
-            "cc-ssh-bridge {}\n",
-            env!("CARGO_PKG_VERSION")
-        )));
+        .stdout(predicate::function(|output: &str| {
+            output == concat!("cc-ssh-bridge ", env!("CARGO_PKG_VERSION"), "\n")
+        }));
 
     Command::new(env!("CARGO_BIN_EXE_cc-ssh-bridge"))
         .arg("-V")
@@ -87,7 +86,9 @@ fn cli_fatal_failures_include_the_stable_code_and_detail_message() {
         .env("CC_SSH_BRIDGE_CONFIG", &unsupported)
         .assert()
         .failure()
-        .stderr(predicate::str::eq("cc-ssh-bridge fatal: INVALID_CONFIG\n"));
+        .stderr(predicate::function(|output: &str| {
+            output == "cc-ssh-bridge fatal: INVALID_CONFIG\n"
+        }));
 }
 
 #[test]
