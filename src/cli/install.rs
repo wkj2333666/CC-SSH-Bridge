@@ -951,6 +951,11 @@ fn resolve_layout(layout: InstallLayout) -> BridgeResult<ResolvedInstall> {
     let plugin_hash = sha256_file(&plugin_manifest)?;
     let mcp_hash = sha256_file(&mcp_manifest)?;
     let skill_hash = hash_secure_skill_tree(&skill_source)?;
+    // The installation identity deliberately excludes the resolved Claude Code
+    // executable: automatic Claude Code updates replace that path without
+    // touching this bundle, and hashing it would lock every existing
+    // installation out of install and uninstall after such an update.
+    let cc_executable_string = path_string(&cc_executable)?;
     let strings = [
         path_string(&binary)?,
         binary_hash.clone(),
@@ -961,7 +966,6 @@ fn resolve_layout(layout: InstallLayout) -> BridgeResult<ResolvedInstall> {
         path_string(&skill_source)?,
         skill_hash.clone(),
         path_string(&layout.skill_target)?,
-        path_string(&cc_executable)?,
     ];
     let mut id_hasher = Sha256::new();
     id_hasher.update(b"cc-ssh-bridge-installation-v1\0");
@@ -981,7 +985,7 @@ fn resolve_layout(layout: InstallLayout) -> BridgeResult<ResolvedInstall> {
         skill_source: strings[6].clone(),
         skill_sha256: skill_hash,
         skill_target: strings[8].clone(),
-        cc_executable: strings[9].clone(),
+        cc_executable: cc_executable_string,
     };
     Ok(ResolvedInstall {
         layout: InstallLayout {
@@ -1255,6 +1259,31 @@ fn skill_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
     }
 }
 
+/// Compare a recorded installation identity against this bundle.
+///
+/// `cc_executable` is deliberately excluded from the comparison: Claude Code
+/// automatic updates resolve a new executable path without changing anything
+/// this bridge installed, so a stale recorded path must not lock the
+/// installation out of future install and uninstall transactions. The bundle
+/// itself (binary, manifests, skill tree, and destinations) is still verified
+/// field by field, preserving the content-hashed rejection of an overwritten
+/// or unrelated bundle.
+fn identity_matches_bundle(
+    recorded: &InstallationIdentity,
+    current: &InstallationIdentity,
+) -> bool {
+    recorded.version == current.version
+        && recorded.binary == current.binary
+        && recorded.binary_sha256 == current.binary_sha256
+        && recorded.plugin_manifest == current.plugin_manifest
+        && recorded.plugin_sha256 == current.plugin_sha256
+        && recorded.mcp_manifest == current.mcp_manifest
+        && recorded.mcp_sha256 == current.mcp_sha256
+        && recorded.skill_source == current.skill_source
+        && recorded.skill_sha256 == current.skill_sha256
+        && recorded.skill_target == current.skill_target
+}
+
 fn marker_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
     match fs::symlink_metadata(&resolved.layout.identity_file) {
         Ok(metadata) => {
@@ -1265,7 +1294,7 @@ fn marker_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
                     BridgeError::invalid_config("installation identity is not UTF-8")
                 })?)
                 .map_err(|_| BridgeError::invalid_config("installation identity is invalid"))?;
-            if identity != resolved.identity {
+            if !identity_matches_bundle(&identity, &resolved.identity) {
                 return Err(BridgeError::invalid_config(
                     "recorded installation identity differs from this bundle",
                 ));
@@ -1614,9 +1643,57 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        InstallJournal, advance_private_source_boundary, apply_config_migration,
-        canonical_secure_cc_executable, inspect_config_migration, rollback_config_migration,
+        InstallJournal, InstallationIdentity, advance_private_source_boundary,
+        apply_config_migration, canonical_secure_cc_executable, identity_matches_bundle,
+        inspect_config_migration, rollback_config_migration,
     };
+
+    fn sample_identity() -> InstallationIdentity {
+        InstallationIdentity {
+            version: 1,
+            installation_id: "id".to_owned(),
+            binary: "/opt/bundle/bin/cc-ssh-bridge".to_owned(),
+            binary_sha256: "binary-digest".to_owned(),
+            plugin_manifest: "/opt/bundle/.claude-plugin/plugin.json".to_owned(),
+            plugin_sha256: "plugin-digest".to_owned(),
+            mcp_manifest: "/opt/bundle/.mcp.json".to_owned(),
+            mcp_sha256: "mcp-digest".to_owned(),
+            skill_source: "/opt/bundle/skills/remote-ssh-ops".to_owned(),
+            skill_sha256: "skill-digest".to_owned(),
+            skill_target: "/home/user/.claude/skills/remote-ssh-ops".to_owned(),
+            cc_executable: "/home/user/.local/share/claude/versions/2.1.239".to_owned(),
+        }
+    }
+
+    #[test]
+    fn identity_comparison_ignores_claude_executable_updates() {
+        let recorded = sample_identity();
+        let mut updated = recorded.clone();
+        updated.installation_id = "recomputed".to_owned();
+        updated.cc_executable = "/home/user/.local/share/claude/versions/2.2.001".to_owned();
+        assert!(identity_matches_bundle(&recorded, &updated));
+    }
+
+    #[test]
+    fn identity_comparison_still_rejects_changed_bundles() {
+        let recorded = sample_identity();
+
+        let mut rebuilt = recorded.clone();
+        rebuilt.binary_sha256 = "different-digest".to_owned();
+        assert!(!identity_matches_bundle(&recorded, &rebuilt));
+
+        let mut edited_skill = recorded.clone();
+        edited_skill.skill_sha256 = "different-digest".to_owned();
+        assert!(!identity_matches_bundle(&recorded, &edited_skill));
+
+        let mut moved = recorded.clone();
+        moved.skill_target = "/home/user/.claude/skills/other".to_owned();
+        assert!(!identity_matches_bundle(&recorded, &moved));
+
+        let mut other_version = recorded;
+        other_version.version = 2;
+        assert!(!identity_matches_bundle(&recorded, &other_version));
+    }
 
     #[test]
     fn secure_cc_executable_preserves_validated_symlink_entry_for_argv0() {
