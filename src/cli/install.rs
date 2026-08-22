@@ -1690,7 +1690,7 @@ mod tests {
         moved.skill_target = "/home/user/.claude/skills/other".to_owned();
         assert!(!identity_matches_bundle(&recorded, &moved));
 
-        let mut other_version = recorded;
+        let mut other_version = recorded.clone();
         other_version.version = 2;
         assert!(!identity_matches_bundle(&recorded, &other_version));
     }
