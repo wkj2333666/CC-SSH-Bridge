@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::sync::Arc;
 
 use cc_ssh_bridge::cli;
@@ -16,7 +17,11 @@ const FATAL_PREFIX: &str = "cc-ssh-bridge fatal: ";
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--version") | Some("-V")) {
-        println!("cc-ssh-bridge {}", env!("CARGO_PKG_VERSION"));
+        // The mcp entry binary reserves stdout for protocol frames, so the
+        // human version banner is written without the println! macro family.
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "cc-ssh-bridge {}", env!("CARGO_PKG_VERSION"));
+        let _ = stdout.flush();
         return;
     }
     if arguments.len() == 1 && arguments[0] == std::ffi::OsStr::new("mcp") {

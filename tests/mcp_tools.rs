@@ -2073,8 +2073,15 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
 }
 
 async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+    // Callers read and parse immediately after this returns, so wait past the
+    // create-then-fill window where the file exists with zero bytes.
     tokio::time::timeout(timeout, async {
-        while !path.exists() {
+        loop {
+            if let Ok(metadata) = std::fs::metadata(path)
+                && metadata.len() > 0
+            {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
