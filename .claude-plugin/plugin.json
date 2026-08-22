@@ -1,6 +1,6 @@
 {
   "name": "cc-ssh-bridge",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Operate configured OpenSSH aliases through a local native bridge without installing or authenticating Claude Code remotely.",
   "author": {
     "name": "Local developer"
